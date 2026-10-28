@@ -81,7 +81,7 @@ class WebTests(unittest.TestCase):
     def test_js_never_uses_innerhtml_and_page_has_no_inline_script(self):
         js = self.request('GET', '/ui/app.js')[1]
         for banned in ('innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'eval('):
-            self.assertNotIn(banned, js)
+            self.assertTrue(banned not in js, banned)
         html = self.request('GET', '/ui')[1]
         self.assertNotIn('onclick=', html)
         self.assertNotIn('style=', html)

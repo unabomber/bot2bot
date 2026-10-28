@@ -1,5 +1,5 @@
 'use strict';
-// Metadata-only admin UI. All dynamic text is inserted with textContent (never innerHTML).
+// Metadata-only admin UI. All dynamic text is inserted as text nodes, never as markup.
 // The CSRF value lives in memory only; the session cookie is HttpOnly and invisible to this script.
 (() => {
   const app = document.getElementById('app');

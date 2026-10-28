@@ -170,8 +170,10 @@ def make_handler(hub):
             self.send_response(code)
             self.send_header('content-type', ctype)
             self.send_header('content-length', str(len(data)))
-            self.send_header('cache-control', 'no-store')
-            self.send_header('x-content-type-options', 'nosniff')
+            given = {key.lower() for key, _ in headers}
+            for key, value in (('cache-control', 'no-store'), ('x-content-type-options', 'nosniff')):
+                if key not in given:  # the web UI supplies its own security headers; never duplicate
+                    self.send_header(key, value)
             for key, value in headers:
                 self.send_header(key, value)
             self.end_headers()
@@ -231,7 +233,7 @@ def make_handler(hub):
             if url.path == '/ui' or url.path.startswith('/ui/'):
                 if hub.web is None:
                     return self.fail(404, 'not found')
-                return hub.web.dispatch(self, method, url.path, q, _int)
+                return hub.web.dispatch(self, method.upper(), url.path, q, _int)
             if 'key' in q or 'token' in q:
                 return self.fail(400, 'credentials in the URL are not accepted; use the Authorization header')
             header = self.headers.get('authorization')
