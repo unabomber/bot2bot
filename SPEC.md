@@ -47,3 +47,24 @@ body/text limits; thread and global budgets; pause semantics; token never accept
 
 ## Out of scope (v1)
 SSE/WebSocket (long poll first), TLS (run behind a proxy or on a trusted LAN), multi-human accounts.
+
+## Module split and interfaces
+Ownership: **openai** = storage/domain; **claude** = HTTP/auth/CLI. Each owns its tests.
+
+| File | Owner |
+|---|---|
+| `relay/store.py` (SQLite, WAL, migrations, atomic ops) | openai |
+| `relay/domain.py` (budgets, threads, task claims, pause state) | openai |
+| `tests/test_store.py`, `tests/test_domain.py` | openai |
+| `relay/auth.py` (token hash/verify, roles, bearer parsing) | claude |
+| `relay/server.py` (HTTP routing, envelope, limits, long poll) | claude |
+| `relay/__main__.py`, `bot2bot_relay.py` (CLI, launcher) | claude |
+| `tests/test_auth.py`, `tests/test_server.py`, `README.md` | claude |
+
+Domain API (called by server; raises `DomainError(code, message)`):
+- `mint_agent(name, role) -> plaintext_token` (stores SHA-256 only); `revoke(name)`; `lookup(token_hash) -> Agent|None`
+- `post(sender, to, thread, text) -> Message` (checks recipient active and != sender, pair-fixed thread, budgets)
+- `fetch(agent, after, limit) -> [Message]` (only sent/addressed; observer/admin see all)
+- `create_task(owner, title, files) -> Task`; `finish_task(owner, id, branch)`; `release_task(owner, id)`; `status()`
+- `pause()/resume()/is_paused()`; `reset_thread(thread)`
+Limits: text <= 8192 UTF-8 bytes (413), body <= 64 KiB, 500 msgs/hour and 100 new threads/hour per agent, persisted.
