@@ -88,6 +88,17 @@ class WebTests(unittest.TestCase):
         self.assertEqual(html.count('<script'), 1)
         self.assertIn('src="/ui/app.js"', html)
 
+    def test_frontend_state_is_view_local_and_layout_is_responsive(self):
+        js = self.request('GET', '/ui/app.js')[1]
+        css = self.request('GET', '/ui/app.css')[1]
+        self.assertNotIn('state.after', js)                 # feed cursor must not be shared across room views
+        self.assertIn('view !== state.view', js)            # stale async completions are ignored
+        self.assertIn('busy', js)                           # polls never overlap
+        self.assertIn('[hidden] { display:none !important; }', css)
+        self.assertNotIn('nth-child', css)                  # no hidden table columns on narrow screens
+        self.assertIn('overflow-x:auto', css)
+        self.assertIn('window.isSecureContext', js)          # clipboard fallback for plain-HTTP pages
+
     def test_static_allowlist_and_traversal(self):
         for path in ('/ui/../relay/server.py', '/ui/%2e%2e/relay/server.py', '/ui/static/app.js', '/ui/index.html',
                      '/ui/app.js/', '/ui/relay/web.py', '/ui/api', '/ui/x'):
