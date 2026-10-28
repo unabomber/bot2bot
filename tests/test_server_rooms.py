@@ -170,6 +170,20 @@ class RoomServerTests(unittest.TestCase):
         self.assertEqual(got[1]['messages'][0]['text'], 'legacy')
         self.assertEqual(self.call('GET', '/rooms/alpha/messages', 'old')[0], 403)
 
+    def test_wait_envelope_shapes(self):
+        self.call('POST', '/say', 'old', {'to': 'old2', 'text': 'one'})
+        legacy = self.call('GET', '/wait?timeout=1', 'old2')[1]['messages'][0]
+        self.assertEqual(legacy['to'], 'old2')            # v1 envelope: scalar
+        room = self.call('GET', '/rooms/default/wait?timeout=1', 'old2')[1]['messages'][0]
+        self.assertEqual(room['to'], ['old2'])            # room envelope: list
+        self.assertEqual(self.call('GET', '/rooms/default/messages', 'old2')[1]['messages'][0]['to'], ['old2'])
+
+    def test_queued_messages_in_closed_room_report_closed(self):
+        self.say('a', ['b'], 'queued')
+        self.call('POST', '/admin/rooms/alpha/close', 'root')
+        status, body = self.call('GET', '/rooms/alpha/wait?timeout=1', 'b')
+        self.assertEqual((status, body['closed'], [m['text'] for m in body['messages']]), (200, True, ['queued']))
+
     def test_default_room_wait_reauthenticates(self):
         result = {}
         t = threading.Thread(target=lambda: result.update(r=self.call('GET', '/rooms/default/wait?timeout=30', 'old2')))

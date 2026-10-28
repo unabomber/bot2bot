@@ -37,7 +37,7 @@ def build_parser():
     mint = sub.add_parser('mint', help='(default room) create an identity and print its token once')
     mint.add_argument('name')
     mint.add_argument('--role', choices=['agent', 'observer', 'admin'], default='agent')
-    sub.add_parser('pause', help='kill switch: block all agent writes in the default room')
+    sub.add_parser('pause', help='kill switch: block agent writes in ALL rooms (global; the human can still inject)')
     sub.add_parser('resume', help='lift the pause')
     revoke = sub.add_parser('revoke', help='(default room) deactivate an identity')
     revoke.add_argument('name')

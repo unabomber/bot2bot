@@ -271,15 +271,15 @@ def make_handler(hub):
             self.dispatch('post')
 
         # ---- helpers ----
-        def wait_reply(self, who, q, room):
+        def wait_reply(self, who, q, room, legacy=False):
             """Long poll for `room`. Every poll re-authenticates the bearer token, so revocation,
             rotation and room closure are noticed within one wake-up interval."""
             def fetch(after):
                 principal = self.reauth()
                 if principal.get('room') not in (None, room):
                     raise DomainError(403, 'credential is not valid in this room')
-                if room == DEFAULT_ROOM and 'room' not in principal:
-                    return domain.fetch(principal, after, 100)
+                if legacy:
+                    return domain.fetch(principal, after, 100)  # v1 envelope: scalar `to`
                 return domain.room_fetch(principal, room, after, 100)
 
             def closed():
@@ -288,6 +288,7 @@ def make_handler(hub):
             after = _int(q, 'after', 0)
             msgs, cursor, is_closed = hub.wait_for(room, who['name'], fetch, closed, after,
                                                    _int(q, 'timeout', MAX_WAIT, 0, MAX_WAIT))
+            is_closed = is_closed or closed()  # always report the actual room state, even with queued messages
             self.reply(200, {'messages': msgs, 'cursor': cursor, 'timeout': not msgs and not is_closed,
                              'closed': is_closed})
 
@@ -305,7 +306,7 @@ def make_handler(hub):
             return principal
 
         def do_legacy_wait(self, who, q, body):
-            self.wait_reply(who, q, DEFAULT_ROOM)
+            self.wait_reply(who, q, DEFAULT_ROOM, legacy=True)
 
         def do_legacy_messages(self, who, q, body):
             rows = domain.fetch(who, _int(q, 'after', 0), _int(q, 'limit', 100, 1, 1000))
