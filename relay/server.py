@@ -143,8 +143,11 @@ def make_handler(hub):
             if length > MAX_BODY:
                 raise DomainError(413, 'request body too large')
             self.unread = 0
+            raw = self.rfile.read(length)
+            if len(raw) != length:
+                raise DomainError(400, 'request body shorter than content-length')
             try:
-                data = json.loads(self.rfile.read(length) or b'{}')
+                data = json.loads(raw or b'{}')
             except (ValueError, UnicodeDecodeError, RecursionError):
                 raise DomainError(400, 'body must be valid JSON') from None
             if not isinstance(data, dict):

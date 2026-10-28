@@ -151,6 +151,18 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.raw_request(base + b'Content-Length: abc\r\n\r\n'), 400)
         self.assertEqual(self.raw_request(base + b'Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n'), 400)
 
+    def test_truncated_body_rejected_and_not_applied(self):
+        import socket
+        payload = json.dumps({'to': 'b', 'thread': 'trunc', 'text': 'must not be stored'}).encode()
+        head = (b'POST /say HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer ' + self.tokens['a'].encode() +
+                b'\r\nContent-Length: ' + str(len(payload) + 100).encode() + b'\r\n\r\n')
+        with socket.create_connection(('127.0.0.1', self.port), timeout=10) as sock:
+            sock.sendall(head + payload)
+            sock.shutdown(socket.SHUT_WR)
+            data = sock.recv(65536)
+        self.assertEqual(int(data.split(b' ', 2)[1]), 400)
+        self.assertEqual(self.call('GET', '/messages', 'root')[1]['messages'], [])
+
     def test_error_replies_survive_unread_bodies(self):
         big = json.dumps({'to': 'b', 'text': 'x' * 200000})
         self.assertEqual(self.call('POST', '/say', 'a', raw=big)[0], 413)
