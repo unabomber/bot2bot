@@ -173,7 +173,7 @@
       threadNo, el('button', { type: 'button', onclick: () => {
         const n = Number(threadNo.value);
         if (!Number.isInteger(n) || n < 1) return notice('Enter the thread number shown in the traffic table', true);
-        act('reset-thread', { thread: n });
+        act('reset-thread', { thread_no: n });
       } }, 'Reset thread budget')));
     const membersBody = el('tbody');
     const addName = el('input', { placeholder: 'new member', pattern: '[A-Za-z0-9_-]{1,64}' });

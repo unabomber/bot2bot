@@ -216,10 +216,10 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.api('POST', 'rooms/alpha/members/b/revoke', s)[0], 200)
         members = self.api('GET', 'rooms/alpha/members', s)[1]['members']
         self.assertEqual({m['name'] for m in members}, {'a', 'eye'})
-        self.assertEqual(self.api('POST', 'rooms/alpha/reset-thread', s, {'thread': 'nothing'})[0], 400)   # labels are content: numbers only
-        self.assertEqual(self.api('POST', 'rooms/alpha/reset-thread', s, {'thread': True})[0], 400)
-        self.assertEqual(self.api('POST', 'rooms/alpha/reset-thread', s, {'thread': 0})[0], 400)
-        self.assertIn(self.api('POST', 'rooms/alpha/reset-thread', s, {'thread': 999})[0], (404, 400))
+        reset = lambda body: self.api('POST', 'rooms/alpha/reset-thread', s, body)[0]
+        for bad in ({'thread': 'nothing'}, {'thread': 1}, {'thread_no': 'x'}, {'thread_no': True}, {'thread_no': 0}, {'thread_no': 1, 'thread': 'label'}, {}):
+            self.assertEqual(reset(bad), 400, bad)          # labels are content: the UI accepts public numbers only
+        self.assertEqual(reset({'thread_no': 999}), 404)
         self.assertEqual(self.api('POST', 'rooms', s, {'name': 'bad name'})[0], 400)
         self.assertEqual(self.api('POST', 'rooms/alpha/inject', s, {'to': 5, 'text': 'x'})[0], 400)
 
@@ -243,6 +243,17 @@ class WebTests(unittest.TestCase):
             self.assertNotIn(secret, blob)
         events = json.loads(seen[3])['events']
         self.assertEqual([e['source'] for e in events], ['agent', 'human'])
+
+    def test_reset_thread_by_public_number(self):
+        s = self.session()
+        made = self.api('POST', 'rooms', s, {'name': 'alpha', 'members': ['a', 'b']})[1]
+        token = {m['name']: m['token'] for m in made['members']}['a']
+        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
+        conn.request('POST', '/rooms/alpha/say', body=json.dumps({'to': ['b'], 'thread': 'some-label', 'text': 'x'}),
+                     headers={'Authorization': f'Bearer {token}'})
+        self.assertEqual(conn.getresponse().status, 200)
+        number = self.api('GET', 'rooms/alpha/monitor', s)[1]['events'][0]['thread_no']
+        self.assertEqual(self.api('POST', 'rooms/alpha/reset-thread', s, {'thread_no': number})[0], 200)
 
     def test_logout_and_logout_all(self):
         one, two = self.session(), self.session()
