@@ -243,6 +243,82 @@ class WebTests(unittest.TestCase):
         self.domain.revoke('root2')
         self.assertEqual(self.api('GET', 'rooms', (cookie, csrf))[0], 401)
 
+    def test_concurrent_requests_do_not_share_state(self):
+        # Two admins inside list_rooms at the same moment (barrier). Per-request state must stay separate:
+        # each response must carry its own admin name and reach its own connection.
+        second = self.domain.mint_agent('root2', 'admin')
+        one = self.session()
+        status, cookie, csrf, _ = self.login(second)
+        two = (cookie, csrf)
+        barrier = threading.Barrier(2)
+
+        def fake_list_rooms(admin):
+            barrier.wait(timeout=10)
+            return [{'name': 'seen-by-' + admin['name']}]
+        self.domain.list_rooms = fake_list_rooms
+        results = {}
+
+        def call(key, session):
+            results[key] = self.api('GET', 'rooms', session)
+        threads = [threading.Thread(target=call, args=('root', one)), threading.Thread(target=call, args=('root2', two))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(15)
+        self.assertEqual(results['root'][1]['rooms'][0]['name'], 'seen-by-root')
+        self.assertEqual(results['root2'][1]['rooms'][0]['name'], 'seen-by-root2')
+
+    def test_concurrent_logout_all_only_affects_own_admin(self):
+        second = self.domain.mint_agent('root2', 'admin')
+        one, other = self.session(), self.session()
+        _, cookie, csrf, _ = self.login(second)
+        two = (cookie, csrf)
+        results = {}
+        barrier = threading.Barrier(2)
+        real = self.domain.session_revoke_all
+
+        def synced(session):
+            barrier.wait(timeout=10)
+            return real(session)
+        self.domain.session_revoke_all = synced
+        threads = [threading.Thread(target=lambda k=k, s=s: results.update({k: self.api('POST', 'logout-all', s)}))
+                   for k, s in (('root', one), ('root2', two))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(15)
+        self.assertEqual((results['root'][1]['revoked'], results['root2'][1]['revoked']), (2, 1))
+        self.assertEqual(self.api('GET', 'session', other)[0], 401)
+
+    def test_malformed_login_tokens_are_throttled_too(self):
+        codes = [self.request('POST', '/ui/login', {'token': 'x'})[0] for _ in range(7)]
+        self.assertEqual(codes[:5], [401] * 5)
+        self.assertEqual(codes[-1], 429)
+
+    def test_error_responses_carry_security_headers(self):
+        cases = [self.request('GET', '/ui/nope'), self.request('GET', '/ui', headers={'Host': 'evil.example'}),
+                 self.request('POST', '/ui/login', {'token': 'x' * 43}),
+                 self.request('POST', '/ui/login', raw='not json'),
+                 self.request('GET', '/ui/api/rooms'),
+                 self.request('POST', '/ui/login', {'token': 'x'}, headers={'Content-Length': '-1'})]
+        s = self.session()
+        cases.append(self.request('POST', '/ui/api/rooms', {'name': 'q'}, cookie=s[0], csrf='wrong'))
+        for status, _, resp in cases:
+            self.assertGreaterEqual(status, 400)
+            self.assertIn("default-src 'none'", resp.getheader('Content-Security-Policy') or '', status)
+            self.assertEqual(resp.getheader('X-Frame-Options'), 'DENY')
+            self.assertEqual(resp.getheader('Referrer-Policy'), 'no-referrer')
+
+    def test_duplicate_csrf_headers_rejected(self):
+        cookie, csrf = self.session()
+        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
+        conn.putrequest('POST', '/ui/api/rooms', skip_host=True)
+        for k, v in (('Host', f'127.0.0.1:{self.port}'), ('Origin', self.origin), ('Content-Type', 'application/json'),
+                     ('Cookie', f'b2b_session={cookie}'), ('X-CSRF', csrf), ('X-CSRF', csrf), ('Content-Length', '2')):
+            conn.putheader(k, v)
+        conn.endheaders(b'{}')
+        self.assertEqual(conn.getresponse().status, 403)
+
     def test_wrong_method_and_unknown_api(self):
         s = self.session()
         self.assertEqual(self.api('GET', 'logout', s)[0], 404)

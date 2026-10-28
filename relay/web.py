@@ -6,6 +6,7 @@ import json
 import os
 import re
 
+from .auth import hash_token
 from .domain import DomainError
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
@@ -16,7 +17,6 @@ _STATIC = {
     '/ui/app.js': ('app.js', 'text/javascript; charset=utf-8'),
     '/ui/app.css': ('app.css', 'text/css; charset=utf-8'),
 }
-_TOKEN = re.compile(r'[A-Za-z0-9_-]{20,128}')
 ROOM = r'(?P<room>[A-Za-z0-9_-]{1,64})'
 NAME = r'(?P<name>[A-Za-z0-9_-]{1,64})'
 API = [(m, re.compile('/ui/api/' + p), h) for m, p, h in [
@@ -39,6 +39,9 @@ API = [(m, re.compile('/ui/api/' + p), h) for m, p, h in [
 
 
 class Web:
+    """Immutable shared state (static assets, guards, hub). Holds NO per-request state: every request gets its own
+    _Request, because the server handles requests on concurrent threads."""
+
     def __init__(self, hub, security):
         self.hub, self.domain, self.sec = hub, hub.domain, security
         self.files = {}
@@ -46,12 +49,22 @@ class Web:
             with open(os.path.join(STATIC_DIR, name), 'rb') as f:
                 self.files[path] = (f.read(), ctype)
 
-    # ---- entry point, called by the server for every /ui request ----
     def dispatch(self, h, method, path, q, int_arg):
-        self.h, self.int_arg = h, int_arg
+        return _Request(self, h, int_arg).run(method, path, q)
+
+
+class _Request:
+    def __init__(self, web, h, int_arg):
+        self.web, self.h, self.int_arg = web, h, int_arg
+        self.hub, self.domain, self.sec = web.hub, web.domain, web.sec
+        self.sid = self.info = self.admin = None
+
+    # ---- one instance per request ----
+    def run(self, method, path, q):
+        h = self.h
         self.sec.check_host(h.headers)
-        if method == 'GET' and path in self.files:
-            data, ctype = self.files[path]
+        if method == 'GET' and path in self.web.files:
+            data, ctype = self.web.files[path]
             return h.reply(200, data, self.sec.headers(), ctype)
         if method == 'POST' and path == '/ui/login':
             return self.login()
@@ -69,10 +82,8 @@ class Web:
         self.sec.check_request(self.h.headers, mutation=True)
         body = self.h.body()
         token = body.get('token')
-        if not isinstance(token, str) or not _TOKEN.fullmatch(token):
-            raise DomainError(401, 'invalid token')
-        from .auth import hash_token
-        made = self.domain.session_create(hash_token(token), self.h.client_address[0])
+        # Every submitted value is hashed and goes through session_create, so malformed guesses are throttled too.
+        made = self.domain.session_create(hash_token(token if isinstance(token, str) else ''), self.h.client_address[0])
         cookie = self.sec.session_cookie(made['session'])
         self.reply_json(200, {'csrf': made['csrf'], 'expires_at': made['expires_at']}, [('set-cookie', cookie)])
 
@@ -82,7 +93,10 @@ class Web:
         sid = self.sec.cookie_session(self.h.headers)
         if sid is None:
             return self.reply_json(401, {'error': 'not signed in', 'code': 401})
-        csrf = self.h.headers.get('x-csrf')
+        csrf_values = self.h.headers.get_all('x-csrf') or []
+        if len(csrf_values) > 1:
+            raise DomainError(403, 'ambiguous CSRF header')
+        csrf = csrf_values[0] if csrf_values else None
         info = self.domain.session_validate(sid, csrf, mutation=mutation)
         if info is None:
             return self.reply_json(401, {'error': 'session expired', 'code': 401},

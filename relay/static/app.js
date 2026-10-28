@@ -77,15 +77,35 @@
       message ? el('p', { class: 'muted' }, message) : '', form));
   }
 
+  // navigator.clipboard only exists in secure contexts (https/localhost), not on a plain-HTTP LAN page, so fall back
+  // to selecting the text and offering manual copy; none of this may throw.
+  function copyToken(node) {
+    const text = node.textContent;
+    const manual = () => {
+      try {
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        if (document.execCommand && document.execCommand('copy')) return notice('Copied');
+      } catch (e) { /* fall through */ }
+      notice('Selected: press Ctrl+C (or Cmd+C) to copy', true);
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(() => notice('Copied'), manual);
+    } else {
+      manual();
+    }
+  }
+
   function secretPanel(title, items) {
     const box = el('section', {}, el('h2', {}, title),
       el('p', { class: 'muted' }, 'Shown once. Copy now; it cannot be displayed again.'));
     for (const [label, token] of items) {
-      box.append(el('div', { class: 'secret' }, el('div', {}, label),
-        el('code', {}, token),
-        el('div', { class: 'row' }, el('button', { type: 'button', onclick: () => {
-          navigator.clipboard.writeText(token).then(() => notice('Copied'), () => notice('Copy failed', true));
-        } }, 'Copy'))));
+      const code = el('code', {}, token);
+      box.append(el('div', { class: 'secret' }, el('div', {}, label), code,
+        el('div', { class: 'row' }, el('button', { type: 'button', onclick: () => copyToken(code) }, 'Copy'))));
     }
     box.append(el('button', { type: 'button', onclick: () => box.remove() }, 'Dismiss'));
     return box;
