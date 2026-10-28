@@ -128,6 +128,40 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.call('GET', '/admin/pause', 'root')[0], 404)
         self.assertFalse(self.domain.is_paused())
 
+    def raw_request(self, request):
+        import socket
+        with socket.create_connection(('127.0.0.1', self.port), timeout=10) as sock:
+            sock.sendall(request)
+            data = b''
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        return int(data.split(b' ', 2)[1])
+
+    def test_malformed_input_never_500(self):
+        for query in ('after=%C2%B2', 'after=' + '9' * 5000, 'after=-1', 'after=1.5', 'timeout=%C2%B2'):
+            self.assertEqual(self.call('GET', f'/wait?{query}', 'a')[0], 400, query)
+        self.assertEqual(self.call('POST', '/say', 'a', raw='[' * 20000)[0], 400)
+        auth = f"Authorization: Bearer {self.tokens['a']}\r\n".encode()
+        base = b'POST /say HTTP/1.1\r\nHost: x\r\n' + auth
+        self.assertEqual(self.raw_request(base + b'Content-Length: -1\r\n\r\n'), 400)
+        self.assertEqual(self.raw_request(base + b'Content-Length: 5\r\nContent-Length: 6\r\n\r\nhello'), 400)
+        self.assertEqual(self.raw_request(base + b'Content-Length: abc\r\n\r\n'), 400)
+        self.assertEqual(self.raw_request(base + b'Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n'), 400)
+
+    def test_error_replies_survive_unread_bodies(self):
+        big = json.dumps({'to': 'b', 'text': 'x' * 200000})
+        self.assertEqual(self.call('POST', '/say', 'a', raw=big)[0], 413)
+        self.assertEqual(self.call('POST', '/admin/pause', 'a', raw=big)[0], 403)
+        self.assertEqual(self.call('POST', '/say', raw=big)[0], 401)
+
+    def test_slow_client_times_out(self):
+        import socket
+        from relay import server
+        self.assertEqual(server.SOCKET_TIMEOUT, 30)
+
     def test_roles_enforced_per_route(self):
         self.assertEqual(self.call('GET', '/wait?timeout=0', 'eye')[0], 403)
         self.assertEqual(self.call('GET', '/wait?timeout=0', 'root')[0], 403)

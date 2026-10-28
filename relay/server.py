@@ -1,5 +1,6 @@
 """HTTP layer: authentication, limits, envelopes and long polling over relay.domain."""
 import json
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -11,6 +12,8 @@ from .domain import DomainError
 MAX_BODY = 64 * 1024
 MAX_WAIT = 60
 MAX_WAITS_PER_AGENT = 2
+DRAIN_LIMIT = 1024 * 1024
+SOCKET_TIMEOUT = 30
 BUCKET_BURST, BUCKET_RATE = 20, 5.0
 
 
@@ -88,7 +91,7 @@ ROUTES = {
 
 def _int(q, key, default, lo=0, hi=2**63 - 1):
     raw = q.get(key, [str(default)])[0]
-    if not raw.isdigit() or not lo <= int(raw) <= hi:
+    if not re.fullmatch(r'[0-9]{1,18}', raw) or not lo <= int(raw) <= hi:
         raise DomainError(400, f'invalid {key}')
     return int(raw)
 
@@ -97,6 +100,9 @@ def make_handler(hub):
     domain = hub.domain
 
     class Handler(BaseHTTPRequestHandler):
+        timeout = SOCKET_TIMEOUT
+        unread = 0
+
         def log_message(self, *args):
             pass
 
@@ -115,22 +121,42 @@ def make_handler(hub):
         def fail(self, code, message, headers=()):
             self.reply(code, {'error': message, 'code': code}, headers)
 
+        def framing(self):
+            """Validate request framing; returns the declared body length (0 for GET)."""
+            if self.headers.get('transfer-encoding') is not None:
+                raise DomainError(400, 'chunked or encoded request bodies are not supported')
+            raw = self.headers.get_all('content-length') or ['0']
+            if len(raw) != 1 or not re.fullmatch(r'[0-9]{1,12}', raw[0].strip()):
+                raise DomainError(400, 'invalid content-length')
+            return int(raw[0])
+
         def body(self):
-            try:
-                length = int(self.headers.get('content-length', '0'))
-            except ValueError:
-                raise DomainError(400, 'invalid content-length') from None
+            length = self.unread
             if length > MAX_BODY:
                 raise DomainError(413, 'request body too large')
+            self.unread = 0
             try:
                 data = json.loads(self.rfile.read(length) or b'{}')
-            except (ValueError, UnicodeDecodeError):
+            except (ValueError, UnicodeDecodeError, RecursionError):
                 raise DomainError(400, 'body must be valid JSON') from None
             if not isinstance(data, dict):
                 raise DomainError(400, 'body must be a JSON object')
             return data
 
+        def drain(self):
+            """Discard an unread request body (bounded) so the error reply is not lost to a reset."""
+            left, self.unread = self.unread, 0
+            if left > DRAIN_LIMIT:
+                self.close_connection = True
+                return
+            while left > 0:
+                chunk = self.rfile.read(min(left, 65536))
+                if not chunk:
+                    break
+                left -= len(chunk)
+
         def handle_request(self, method):
+            self.unread = self.framing()
             url = urlparse(self.path)
             q = parse_qs(url.query)
             if 'key' in q or 'token' in q:
@@ -155,11 +181,14 @@ def make_handler(hub):
 
         def dispatch(self, method):
             try:
-                self.handle_request(method)
+                try:
+                    self.handle_request(method)
+                finally:
+                    self.drain()
             except DomainError as err:
                 self.fail(err.code, err.message)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+            except (BrokenPipeError, ConnectionResetError, TimeoutError):
+                self.close_connection = True
             except Exception:
                 self.fail(500, 'internal error')
 
