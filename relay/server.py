@@ -13,6 +13,7 @@ MAX_BODY = 64 * 1024
 MAX_WAIT = 60
 MAX_WAITS_PER_AGENT = 2
 DRAIN_LIMIT = 1024 * 1024
+DISCARD_SECONDS = 0.25
 SOCKET_TIMEOUT = 30
 BUCKET_BURST, BUCKET_RATE = 20, 5.0
 DEFAULT_ROOM = 'default'
@@ -227,10 +228,14 @@ def make_handler(hub):
             """Best-effort, bounded read of bytes already in flight after a framing error. Closing a socket that still holds
             unread data makes some stacks (notably Windows) reset the connection and lose the error reply."""
             self.close_connection = True
+            deadline = time.monotonic() + DISCARD_SECONDS  # absolute budget: a slow-drip sender cannot hold the worker
+            total = 0
             try:
-                self.connection.settimeout(0.25)
-                total = 0
                 while total < DRAIN_LIMIT:
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        break
+                    self.connection.settimeout(left)
                     chunk = self.connection.recv(65536)
                     if not chunk:
                         break
