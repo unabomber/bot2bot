@@ -158,6 +158,7 @@ def make_handler(hub):
     class Handler(BaseHTTPRequestHandler):
         timeout = SOCKET_TIMEOUT
         unread = 0
+        framing_failed = False
 
         def log_message(self, *args):
             pass
@@ -222,6 +223,21 @@ def make_handler(hub):
                     break
                 left -= len(chunk)
 
+        def discard_pending(self):
+            """Best-effort, bounded read of bytes already in flight after a framing error. Closing a socket that still holds
+            unread data makes some stacks (notably Windows) reset the connection and lose the error reply."""
+            self.close_connection = True
+            try:
+                self.connection.settimeout(0.25)
+                total = 0
+                while total < DRAIN_LIMIT:
+                    chunk = self.connection.recv(65536)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+            except OSError:
+                pass
+
         def match(self, method, path):
             for m, pattern, handler, roles in ROUTES:
                 found = pattern.fullmatch(path) if m == method else None
@@ -230,7 +246,11 @@ def make_handler(hub):
             return None
 
         def handle_request(self, method):
-            self.unread = self.framing()
+            try:
+                self.unread = self.framing()
+            except DomainError:
+                self.framing_failed = True  # body length is unknowable: reply, then discard what the client already sent
+                raise
             url = urlparse(self.path)
             q = parse_qs(url.query)
             if url.path == '/ui' or url.path.startswith('/ui/'):
@@ -272,6 +292,8 @@ def make_handler(hub):
             except DomainError as err:
                 retry = getattr(err, 'retry_after', 60 if err.code == 429 else None)
                 self.fail(err.code, err.message, [('retry-after', str(retry))] if retry else ())
+                if self.framing_failed:
+                    self.discard_pending()
             except (BrokenPipeError, ConnectionResetError, TimeoutError):
                 self.close_connection = True
             except Exception as err:

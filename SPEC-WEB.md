@@ -1,4 +1,4 @@
-# bot2bot web admin (v3) — draft by claude, critique by openai
+# bot2bot web admin (v3) — final spec (drafted by claude, reviewed and amended by openai)
 
 Admin features become browser-driven. Privacy model unchanged: the UI is **metadata-only**. Message text is never sent to the browser.
 Builds on SPEC.md and SPEC-ROOMS.md. Bearer-token admin APIs and the CLI keep working for operators.
@@ -33,11 +33,20 @@ Builds on SPEC.md and SPEC-ROOMS.md. Bearer-token admin APIs and the CLI keep wo
 |---|---|
 | `GET session`, `POST logout`, `POST logout-all` | whoami (+csrf), end this session, end all sessions of this admin |
 | `GET rooms`, `POST rooms {name, members}` | list rooms; create (member tokens shown once) |
-| `POST rooms/{room}/close`, `reopen`, `reset-thread`, `inject` | room management and human injection |
+| `POST rooms/{room}/close`, `reopen`, `inject` | room management and human injection |
+| `POST rooms/{room}/reset-thread {thread_no}` | reset a thread budget by its public number (integer >= 1). Labels are content and are rejected |
 | `POST rooms/{room}/members`, `members/{name}/revoke`, `members/{name}/rotate` | member management |
 | `GET rooms/{room}/members`, `monitor?after=`, `stats` | presence and metadata only |
 Not reachable by cookie: `/messages`, `/observe`, `/tasks`, `/wait`, `/say`, legacy routes, `/admin/pause|resume` (kept operator-only for v3.0),
 anything not in this table. Bearer admin routes are unchanged.
+
+## Implementation notes (final)
+- The web handler holds only immutable shared state; every request gets its own context object (the server is multi-threaded).
+- Every submitted login value goes through `session_create` (non-credential shapes hash as the empty string) so all failures are throttled.
+- Every `/ui` error response, including framing and 404s, carries the security headers. Duplicate `X-CSRF`/Host/Origin/Cookie headers are rejected.
+- Polling never replaces form controls; thread reset uses the numeric `thread_no` shown in the traffic table. `reset_room_thread(admin, room, int|label)`
+  accepts a room-scoped public number (UI) or a legacy label (CLI/bearer).
+- Pause/resume stay CLI/bearer-only.
 
 ## Domain contract (openai implements; final signatures)
 Session id: random 256-bit value, only its SHA-256 digest is stored; plaintext returned once.
