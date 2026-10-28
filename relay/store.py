@@ -105,6 +105,7 @@ class Store:
             if 'display_path' not in {r['name'] for r in db.execute('PRAGMA table_info(claims)')}:
                 db.execute('ALTER TABLE claims ADD COLUMN display_path TEXT')
             if current and int(current[0]) == 2:
+                self._room_sequences(db)
                 return
             for table in ('threads', 'messages', 'tasks', 'claims'):
                 if 'room_id' not in {r['name'] for r in db.execute(f'PRAGMA table_info({table})')}:
@@ -125,7 +126,41 @@ class Store:
                        "(SELECT number FROM room_threads WHERE room_id='default' AND label=messages.thread)")
             db.execute("INSERT OR IGNORE INTO deliveries SELECT 'default',id,sender FROM messages")
             db.execute("INSERT OR IGNORE INTO deliveries SELECT 'default',id,recipient FROM messages")
+            self._room_sequences(db)
             db.execute("INSERT OR REPLACE INTO settings VALUES ('schema_version','2')")
+
+    @staticmethod
+    def _room_sequences(db):
+        """Expose room-local cursors while retaining global internal foreign keys.
+
+        This also upgrades pre-release v2 databases atomically. Default-room v1
+        cursors keep their original values; other rooms start at one.
+        """
+        done = db.execute("SELECT value FROM settings WHERE key='room_local_sequences'").fetchone()
+        if done and done[0]=='1':
+            return
+        for table,column in [('messages','public_id'),('room_threads','public_number')]:
+            if column not in {r['name'] for r in db.execute(f'PRAGMA table_info({table})')}:
+                db.execute(f'ALTER TABLE {table} ADD COLUMN {column} INTEGER')
+        last = {}
+        for row in db.execute('SELECT id,room_id,public_id FROM messages ORDER BY room_id,id').fetchall():
+            room = row['room_id']
+            value = row['public_id']
+            if value is None:
+                value = row['id'] if room=='default' else last.get(room,0)+1
+                db.execute('UPDATE messages SET public_id=? WHERE id=?',(value,row['id']))
+            last[room] = max(last.get(room,0),value)
+        last = {}
+        for row in db.execute('SELECT number,room_id,public_number FROM room_threads ORDER BY room_id,number').fetchall():
+            room = row['room_id']
+            value = row['public_number']
+            if value is None:
+                value = last.get(room,0)+1
+                db.execute('UPDATE room_threads SET public_number=? WHERE number=?',(value,row['number']))
+            last[room] = max(last.get(room,0),value)
+        db.execute('CREATE UNIQUE INDEX IF NOT EXISTS public_message_cursor ON messages(room_id,public_id)')
+        db.execute('CREATE UNIQUE INDEX IF NOT EXISTS public_thread_number ON room_threads(room_id,public_number)')
+        db.execute("INSERT OR REPLACE INTO settings VALUES ('room_local_sequences','1')")
 
     @contextmanager
     def transaction(self, *, read_only=False):
