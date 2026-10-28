@@ -44,6 +44,15 @@ class DomainTests(unittest.TestCase):
         self.error(409, self.d.mint_agent, 'openai')
         self.error(403, self.d.post, 'openai', 'claude', 't', 'hello')
 
+    def test_last_admin_cannot_be_revoked(self):
+        self.error(409, self.d.revoke, 'human')
+        self.assertIsNotNone(self.principal('human'))
+        token = self.d.mint_agent('backup', 'admin')
+        self.d.revoke('human')
+        self.assertIsNone(self.principal('human'))
+        self.error(409, self.d.revoke, 'backup')
+        self.assertIsNotNone(self.d.lookup(hashlib.sha256(token.encode()).hexdigest()))
+
     def test_visibility_replay_and_monotonic_ids_after_restart(self):
         one = self.d.post('openai', 'claude', 't', 'first')
         two = self.d.post('claude', 'openai', 't', 'reply')
@@ -115,7 +124,7 @@ class DomainTests(unittest.TestCase):
 
     def test_claim_normalization_ownership_and_release(self):
         task = self.d.create_task('openai', 'storage', ['Relay\\Store.py'])
-        self.assertEqual(task['files'], ['relay/store.py'])
+        self.assertEqual(task['files'], ['Relay/Store.py'])
         for owner in ['openai', 'claude']:
             self.error(409, self.d.create_task, owner, 'duplicate', ['relay/STORE.py'])
             self.error(409, self.d.create_task, owner, 'parent', ['relay'])
@@ -124,6 +133,8 @@ class DomainTests(unittest.TestCase):
         self.error(400, self.d.finish_task, 'openai', task['id'], 'openai/x..y')
         done = self.d.finish_task('openai', task['id'], 'openai/store')
         self.assertEqual(done['status'], 'done')
+        self.error(409, self.d.finish_task, 'openai', task['id'], 'openai/overwrite')
+        self.assertEqual(self.d.tasks()[0]['branch'], 'openai/store')
         self.error(409, self.d.create_task, 'claude', 'still held', ['relay'])
         self.d.release_task('openai', task['id'])
         self.d.create_task('claude', 'released', ['relay'])
