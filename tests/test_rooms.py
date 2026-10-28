@@ -167,3 +167,11 @@ class RoomTests(unittest.TestCase):
         self.error(409,self.d.post,'legacy_a','legacy_b','legacy','blocked')
         self.d.reset_room_thread(self.admin,'default','legacy')
         self.d.post('legacy_a','legacy_b','legacy','reset')
+
+    def test_legacy_reuses_a_room_thread_at_creation_limit(self):
+        a = self.d.mint_agent('legacy_a')
+        self.d.mint_agent('legacy_b')
+        self.d = Domain(self.store,hourly_threads=1)
+        self.d.room_post(self.principal(a),'default',['legacy_b'],'shared','room first')
+        self.d.post('legacy_a','legacy_b','shared','legacy reuses existing thread')
+        self.assertEqual(len(self.d.fetch(self.principal(a))),2)

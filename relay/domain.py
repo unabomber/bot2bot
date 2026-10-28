@@ -159,7 +159,7 @@ class Domain:
             room_thread = db.execute("SELECT * FROM room_threads WHERE room_id='default' AND label=?", (thread,)).fetchone()
             if room_thread is not None and room_thread['used'] >= self.thread_budget:
                 raise DomainError(409, 'thread budget exhausted; admin reset required')
-            existing = db.execute('SELECT * FROM threads WHERE id=?', (thread,)).fetchone()
+            existing = db.execute("SELECT * FROM threads WHERE id=? AND room_id='default'", (thread,)).fetchone()
             if existing is not None:
                 if pair != [existing['participant_a'], existing['participant_b']]:
                     raise DomainError(409, 'thread belongs to different participants')
@@ -168,8 +168,10 @@ class Domain:
             else:
                 count = db.execute("SELECT count(*) FROM room_threads WHERE room_id='default' AND creator=? AND created>?",
                                    (sender, now - 3600)).fetchone()[0]
-                if count >= self.hourly_threads:
+                if room_thread is None and count >= self.hourly_threads:
                     raise DomainError(429, 'hourly thread creation budget exhausted')
+                if db.execute("SELECT 1 FROM threads WHERE id=? AND room_id!='default'", (thread,)).fetchone():
+                    raise DomainError(409, 'legacy thread identifier unavailable')
                 db.execute('INSERT INTO threads(id,participant_a,participant_b,creator,created) '
                            'VALUES (?,?,?,?,?)', (thread, *pair, sender, now))
             cursor = db.execute('INSERT INTO messages(sender,recipient,thread,text,created) '
@@ -205,8 +207,8 @@ class Domain:
     @staticmethod
     def _task(db, row):
         task = dict(row)
-        task['files'] = [r[0] for r in db.execute('SELECT COALESCE(display_path,path) FROM claims WHERE task_id=? ORDER BY path',
-                                                (row['id'],))]
+        task['files'] = [r[0] for r in db.execute('SELECT COALESCE(display_path,path) FROM claims WHERE task_id=? AND room_id=? ORDER BY path',
+                                                (row['id'],row['room_id']))]
         return task
 
     def create_task(self, owner, title, files):
@@ -274,7 +276,7 @@ class Domain:
                 owner = owners.setdefault(task['owner'], {'tasks': 0, 'done': 0, 'files': 0})
                 owner['tasks'] += 1
                 owner['done'] += task['status'] == 'done'
-                owner['files'] += db.execute('SELECT count(*) FROM claims WHERE task_id=?',
+                owner['files'] += db.execute("SELECT count(*) FROM claims WHERE room_id='default' AND task_id=?",
                                              (task['id'],)).fetchone()[0]
             total = sum(o['files'] for o in owners.values()) or 1
             for owner in owners.values():
@@ -301,7 +303,7 @@ class Domain:
         with self.store.transaction() as db:
             if not db.execute("SELECT 1 FROM room_threads WHERE room_id='default' AND label=?", (thread,)).fetchone():
                 raise DomainError(404, 'no such thread')
-            db.execute('UPDATE threads SET used=0 WHERE id=?', (thread,))
+            db.execute("UPDATE threads SET used=0 WHERE room_id='default' AND id=?", (thread,))
             db.execute("UPDATE room_threads SET used=0 WHERE room_id='default' AND label=?", (thread,))
 
     @classmethod
