@@ -620,15 +620,20 @@ class Domain:
             return [self._task(db,r) for r in db.execute('SELECT * FROM tasks WHERE room_id=? ORDER BY id',(room,))]
 
     def reset_room_thread(self, admin, room, thread):
-        _string(thread,'thread',128)
+        if type(thread) is int:
+            _integer(thread,'thread number',1)
+            selector = 'public_number'
+        else:
+            _string(thread,'thread',128)
+            selector = 'label'
         with self.store.transaction() as db:
             actor = self._admin(db,admin)
             self._room_auth(db,admin,room)
-            cur = db.execute('UPDATE room_threads SET used=0 WHERE room_id=? AND label=?',(room,thread))
+            cur = db.execute('UPDATE room_threads SET used=0 WHERE room_id=? AND '+selector+'=?',(room,thread))
             if not cur.rowcount:
                 raise DomainError(404,'no such thread')
             if room=='default':
-                db.execute('UPDATE threads SET used=0 WHERE id IN (SELECT storage_key FROM room_threads WHERE room_id=? AND label=?)',(room,thread))
+                db.execute('UPDATE threads SET used=0 WHERE id IN (SELECT storage_key FROM room_threads WHERE room_id=? AND '+selector+'=?)',(room,thread))
             self._event(db,room,actor['name'],'reset-thread')
 
     @staticmethod
