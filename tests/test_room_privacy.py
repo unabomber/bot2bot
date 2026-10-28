@@ -93,3 +93,19 @@ class RoomPrivacyTests(unittest.TestCase):
         rows = self.d.monitor(self.monitor,'one')
         self.assertEqual([r['id'] for r in rows],[self.message['id']])
         self.assertEqual(self.d.stats(self.monitor,'one')['messages'],1)
+
+    def test_public_cursors_and_thread_numbers_do_not_reveal_other_room_traffic(self):
+        for i in range(5):
+            self.d.room_post(self.people['two','a'],'two',['b'],'private-'+str(i),'other room')
+        second = self.d.room_post(self.a,'one',['b'],'another','second')
+        self.assertEqual(second['id'],2)
+        rows = self.d.monitor(self.monitor,'one')
+        self.assertEqual([(r['id'],r['thread_no']) for r in rows],[(1,1),(2,2)])
+        self.assertEqual([m['id'] for m in self.d.room_fetch(self.a,'one',1)],[2])
+        self.assertEqual([r['id'] for r in self.d.monitor(self.monitor,'one',1)],[2])
+        self.d.mint_agent('old_a')
+        self.d.mint_agent('old_b')
+        first_default = self.d.post('old_a','old_b','old','first default')
+        self.assertEqual(first_default['id'],1)
+        self.d.room_post(self.a,'one',['b'],'another','third')
+        self.assertEqual(self.d.post('old_a','old_b','old','second default')['id'],2)

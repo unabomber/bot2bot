@@ -129,7 +129,7 @@ class Domain:
     @staticmethod
     def _message(row):
         to = json.loads(row['recipient']) if row['recipient'].startswith('[') else [row['recipient']]
-        return {'id': row['id'], 'from': row['sender'], 'to': to[0] if len(to)==1 else to,
+        return {'id': row['public_id'], 'from': row['sender'], 'to': to[0] if len(to)==1 else to,
                 'thread': row['label'] if 'label' in row.keys() else row['thread'], 'text': row['text'],
                 'untrusted': True, 'ts': row['created']}
 
@@ -178,10 +178,12 @@ class Domain:
                                 'VALUES (?,?,?,?,?)', (sender, to, thread, text, now))
             db.execute('UPDATE threads SET used=used+1 WHERE id=?', (thread,))
             if room_thread is None:
-                db.execute("INSERT INTO room_threads(room_id,label,storage_key,creator,created) VALUES ('default',?,?,?,?)", (thread,thread,sender,now))
+                number = db.execute("SELECT coalesce(max(public_number),0)+1 FROM room_threads WHERE room_id='default'").fetchone()[0]
+                db.execute("INSERT INTO room_threads(room_id,label,storage_key,creator,created,public_number) VALUES ('default',?,?,?,?,?)", (thread,thread,sender,now,number))
                 room_thread = db.execute("SELECT * FROM room_threads WHERE room_id='default' AND label=?", (thread,)).fetchone()
             db.execute('UPDATE room_threads SET used=used+1 WHERE number=?', (room_thread['number'],))
-            db.execute('UPDATE messages SET bytes=?,thread_no=? WHERE id=?', (size,room_thread['number'],cursor.lastrowid))
+            public_id = db.execute("SELECT coalesce(max(public_id),0)+1 FROM messages WHERE room_id='default'").fetchone()[0]
+            db.execute('UPDATE messages SET bytes=?,thread_no=?,public_id=? WHERE id=?', (size,room_thread['number'],public_id,cursor.lastrowid))
             db.executemany("INSERT INTO deliveries(room_id,message_id,member) VALUES ('default',?,?)", [(cursor.lastrowid,sender),(cursor.lastrowid,to)])
             row = db.execute('SELECT * FROM messages WHERE id=?', (cursor.lastrowid,)).fetchone()
             return self._message(row)
@@ -196,11 +198,11 @@ class Domain:
             if actual['role'] != agent.get('role'):
                 raise DomainError(403, 'invalid principal role')
             if actual['role'] == 'agent':
-                rows = db.execute("SELECT m.*,t.label FROM messages m JOIN room_threads t ON t.number=m.thread_no WHERE m.room_id='default' AND m.id>? AND "
-                                  "EXISTS(SELECT 1 FROM deliveries d WHERE d.room_id='default' AND d.message_id=m.id AND d.member=?) ORDER BY m.id LIMIT ?",
+                rows = db.execute("SELECT m.*,t.label FROM messages m JOIN room_threads t ON t.number=m.thread_no WHERE m.room_id='default' AND m.public_id>? AND "
+                                  "EXISTS(SELECT 1 FROM deliveries d WHERE d.room_id='default' AND d.message_id=m.id AND d.member=?) ORDER BY m.public_id LIMIT ?",
                                   (after, actual['name'], limit)).fetchall()
             else:
-                rows = db.execute("SELECT m.*,t.label FROM messages m JOIN room_threads t ON t.number=m.thread_no WHERE m.room_id='default' AND m.id>? ORDER BY m.id LIMIT ?",
+                rows = db.execute("SELECT m.*,t.label FROM messages m JOIN room_threads t ON t.number=m.thread_no WHERE m.room_id='default' AND m.public_id>? ORDER BY m.public_id LIMIT ?",
                                   (after, limit)).fetchall()
             return [self._message(row) for row in rows]
 
@@ -462,7 +464,7 @@ class Domain:
     @staticmethod
     def _envelope(row):
         to = json.loads(row['recipient']) if row['recipient'].startswith('[') else [row['recipient']]
-        return {'id':row['id'],'room':row['room_id'],'thread':row['label'],
+        return {'id':row['public_id'],'room':row['room_id'],'thread':row['label'],
                 'from':row['sender'],'to':to,'ts':row['created'],'source':row['source'],
                 'untrusted':True,'text':row['text']}
 
@@ -498,12 +500,14 @@ class Domain:
                     raise DomainError(429,'hourly thread creation budget exhausted')
                 key = 'room-'+secrets.token_hex(24)
                 db.execute('INSERT INTO threads(id,participant_a,participant_b,creator,created,room_id) VALUES (?,?,?,?,?,?)',(key,sender,recipients[0],sender,now,room))
-                db.execute('INSERT INTO room_threads(room_id,label,storage_key,creator,created) VALUES (?,?,?,?,?)',(room,thread,key,sender,now))
+                number = db.execute('SELECT coalesce(max(public_number),0)+1 FROM room_threads WHERE room_id=?',(room,)).fetchone()[0]
+                db.execute('INSERT INTO room_threads(room_id,label,storage_key,creator,created,public_number) VALUES (?,?,?,?,?,?)',(room,thread,key,sender,now,number))
                 t = db.execute('SELECT * FROM room_threads WHERE room_id=? AND label=?',(room,thread)).fetchone()
             if not human and t['used']>=self.thread_budget:
                 raise DomainError(409,'thread budget exhausted; admin reset required')
-            cur = db.execute('INSERT INTO messages(sender,recipient,thread,text,created,room_id,source,bytes,thread_no) VALUES (?,?,?,?,?,?,?,?,?)',
-                (sender,json.dumps(recipients),t['storage_key'],text,now,room,'human' if human else 'agent',size,t['number']))
+            public_id = db.execute('SELECT coalesce(max(public_id),0)+1 FROM messages WHERE room_id=?',(room,)).fetchone()[0]
+            cur = db.execute('INSERT INTO messages(sender,recipient,thread,text,created,room_id,source,bytes,thread_no,public_id) VALUES (?,?,?,?,?,?,?,?,?,?)',
+                (sender,json.dumps(recipients),t['storage_key'],text,now,room,'human' if human else 'agent',size,t['number'],public_id))
             db.executemany('INSERT INTO deliveries(room_id,message_id,member) VALUES (?,?,?)',[(room,cur.lastrowid,n) for n in set(recipients+[sender])])
             if not human:
                 db.execute('UPDATE room_threads SET used=used+1 WHERE number=?',(t['number'],))
@@ -523,21 +527,21 @@ class Domain:
         _integer(limit,'limit',1,1000)
         with self.store.transaction(read_only=True) as db:
             actor = self._room_auth(db,p,room,'content')
-            sql = 'SELECT m.*,t.label FROM messages m JOIN room_threads t ON t.number=m.thread_no WHERE m.room_id=? AND m.id>? '
+            sql = 'SELECT m.*,t.label FROM messages m JOIN room_threads t ON t.number=m.thread_no WHERE m.room_id=? AND m.public_id>? '
             args = [room,after]
             if actor['role']=='agent':
                 sql += 'AND EXISTS(SELECT 1 FROM deliveries d WHERE d.room_id=m.room_id AND d.message_id=m.id AND d.member=?) '
                 args.append(actor['name'])
-            return [self._envelope(r) for r in db.execute(sql+'ORDER BY m.id LIMIT ?',(*args,limit))]
+            return [self._envelope(r) for r in db.execute(sql+'ORDER BY m.public_id LIMIT ?',(*args,limit))]
 
     def monitor(self, p, room, after=0, limit=100):
         _integer(after,'after')
         _integer(limit,'limit',1,1000)
         with self.store.transaction(read_only=True) as db:
             self._room_auth(db,p,room,'metadata')
-            return [dict(r) for r in db.execute('SELECT m.id,m.created AS ts,m.sender AS "from",m.room_id AS room,m.bytes,m.source,m.thread_no, '
+            return [dict(r) for r in db.execute('SELECT m.public_id AS id,m.created AS ts,m.sender AS "from",m.room_id AS room,m.bytes,m.source,t.public_number AS thread_no, '
                 '(SELECT count(*) FROM deliveries d WHERE d.room_id=m.room_id AND d.message_id=m.id AND d.member!=m.sender) AS to_count '
-                'FROM messages m WHERE m.room_id=? AND m.id>? ORDER BY m.id LIMIT ?',(room,after,limit))]
+                'FROM messages m JOIN room_threads t ON t.number=m.thread_no WHERE m.room_id=? AND m.public_id>? ORDER BY m.public_id LIMIT ?',(room,after,limit))]
 
     def stats(self, p, room):
         with self.store.transaction(read_only=True) as db:
