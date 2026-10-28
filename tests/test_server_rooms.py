@@ -243,6 +243,16 @@ class RoomServerTests(unittest.TestCase):
         self.assertEqual((result['r'][0], result['r'][1]['closed'], result['r'][1]['messages']), (200, True, []))
         self.assertLess(time.monotonic() - start, 8)
 
+    def test_ids_do_not_leak_other_rooms_traffic(self):
+        self.call('POST', '/admin/rooms/beta/members', 'root', {'name': 'y'})
+        for i in range(5):
+            self.assertEqual(self.call('POST', '/rooms/beta/say', 'beta_a', {'to': ['y'], 'thread': f'th{i}', 'text': 'noise'})[0], 200)
+        self.assertEqual(self.say('a', ['b'], 'mine', thread='mine')[0], 200)
+        event = self.call('GET', '/rooms/alpha/monitor', 'eye')[1]['events'][0]
+        self.assertEqual((event['id'], event['thread_no']), (1, 1))
+        msg = self.call('GET', '/rooms/alpha/wait?timeout=1', 'b')[1]
+        self.assertEqual((msg['messages'][0]['id'], msg['cursor']), (1, 1))
+
     def test_monitor_can_heartbeat(self):
         self.assertEqual(self.call('POST', '/rooms/alpha/heartbeat', 'eye')[0], 200)
 
