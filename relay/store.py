@@ -79,6 +79,38 @@ CREATE INDEX IF NOT EXISTS login_peer_time ON login_attempts(peer_hash,attempted
 CREATE INDEX IF NOT EXISTS login_global_time ON login_attempts(attempted);
 """
 
+SYNC_SCHEMA = """
+CREATE TABLE IF NOT EXISTS sync_rooms (
+ room_id TEXT PRIMARY KEY REFERENCES rooms(id), version INTEGER NOT NULL DEFAULT 0,
+ allocated INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 0,
+ strict INTEGER NOT NULL DEFAULT 0, auto_pass INTEGER NOT NULL DEFAULT 0,
+ stall_seconds INTEGER NOT NULL DEFAULT 60, turn TEXT, turn_since REAL,
+ turn_version INTEGER NOT NULL DEFAULT 0, started REAL NOT NULL,
+ fingerprint TEXT, stalled_kind TEXT, stalled_members TEXT, stalled_since REAL,
+ notice_count INTEGER NOT NULL DEFAULT 0, next_notice REAL,
+ last_pass REAL, notice_hour REAL NOT NULL DEFAULT 0, hour_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS sync_versions (
+ room_id TEXT NOT NULL REFERENCES rooms(id), version INTEGER NOT NULL,
+ base_version INTEGER NOT NULL, phase TEXT NOT NULL, state TEXT NOT NULL,
+ proposer TEXT NOT NULL, created REAL NOT NULL, deadline REAL NOT NULL,
+ status TEXT NOT NULL, ended REAL, PRIMARY KEY(room_id,version)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS sync_one_open ON sync_versions(room_id) WHERE status='open';
+CREATE TABLE IF NOT EXISTS sync_enrollments (
+ room_id TEXT NOT NULL, version INTEGER NOT NULL, name TEXT NOT NULL,
+ generation INTEGER NOT NULL, acked REAL,
+ PRIMARY KEY(room_id,version,name),
+ FOREIGN KEY(room_id,version) REFERENCES sync_versions(room_id,version)
+);
+CREATE TABLE IF NOT EXISTS sync_statuses (
+ room_id TEXT NOT NULL REFERENCES rooms(id), name TEXT NOT NULL,
+ generation INTEGER NOT NULL, state_version INTEGER NOT NULL, waiting_on TEXT,
+ reason TEXT NOT NULL, declared REAL NOT NULL, deadline REAL,
+ PRIMARY KEY(room_id,name)
+);
+"""
+
 
 class Store:
     def __init__(self, path):
@@ -101,10 +133,10 @@ class Store:
         if 'settings' in tables:
             row = self.connection.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()
             version = int(row[0]) if row else None
-        if version is not None and version > 3:
+        if version is not None and version > 4:
             raise RuntimeError('database schema is newer than this relay supports')
-        if tables and version != 3 and str(path) != ':memory:':
-            backup = Path(str(path) + ('.v2.bak' if version==2 else '.v1.bak'))
+        if tables and version != 4 and str(path) != ':memory:':
+            backup = Path(str(path) + (f'.v{version}.bak' if version in (2,3) else '.v1.bak'))
             if not backup.exists():
                 # SQLite backup includes committed WAL pages, unlike copying the main file.
                 target = sqlite3.connect(str(backup))
@@ -115,15 +147,19 @@ class Store:
         self.connection.executescript(SCHEMA)
         with self.transaction() as db:
             current = db.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()
-            if current and int(current[0]) > 3:
+            if current and int(current[0]) > 4:
                 raise RuntimeError('database schema is newer than this relay supports')
             if 'display_path' not in {r['name'] for r in db.execute('PRAGMA table_info(claims)')}:
                 db.execute('ALTER TABLE claims ADD COLUMN display_path TEXT')
+            if current and int(current[0]) == 4:
+                return
             if current and int(current[0]) == 3:
+                self._sync_tables(db)
                 return
             if current and int(current[0]) == 2:
                 self._room_sequences(db)
                 self._web_tables(db)
+                self._sync_tables(db)
                 return
             for table in ('threads', 'messages', 'tasks', 'claims'):
                 if 'room_id' not in {r['name'] for r in db.execute(f'PRAGMA table_info({table})')}:
@@ -146,6 +182,14 @@ class Store:
             db.execute("INSERT OR IGNORE INTO deliveries SELECT 'default',id,recipient FROM messages")
             self._room_sequences(db)
             self._web_tables(db)
+            self._sync_tables(db)
+
+    @staticmethod
+    def _sync_tables(db):
+        for statement in SYNC_SCHEMA.split(';'):
+            if statement.strip():
+                db.execute(statement)
+        db.execute("INSERT OR REPLACE INTO settings VALUES ('schema_version','4')")
 
     @staticmethod
     def _web_tables(db):

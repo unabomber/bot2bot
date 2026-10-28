@@ -63,7 +63,7 @@ class StoreTests(unittest.TestCase):
                 self.assertEqual(len(Domain(reopened).room_fetch({'name':'a','role':'agent'},'default')),2)
                 self.assertEqual(backup.read_bytes(),initial_backup)
                 with reopened.transaction(read_only=True) as db:
-                    self.assertEqual(db.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()[0],'3')
+                    self.assertEqual(db.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()[0],'4')
                     self.assertEqual(db.execute('SELECT count(*) FROM deliveries').fetchone()[0],4)
             finally:
                 reopened.close()
@@ -124,7 +124,7 @@ class StoreTests(unittest.TestCase):
             try:
                 self.assertEqual(Domain(upgraded).room_fetch(admin,'kept')[0]['text'],'retained content')
                 with upgraded.transaction(read_only=True) as db:
-                    self.assertEqual(db.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()[0],'3')
+                    self.assertEqual(db.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()[0],'4')
                     key = db.execute("SELECT value FROM settings WHERE key='web_csrf_key'").fetchone()[0]
                     self.assertEqual(len(key),64)
                 backup = sqlite3.connect(str(path)+'.v2.bak')
