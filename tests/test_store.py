@@ -63,7 +63,7 @@ class StoreTests(unittest.TestCase):
                 self.assertEqual(len(Domain(reopened).room_fetch({'name':'a','role':'agent'},'default')),2)
                 self.assertEqual(backup.read_bytes(),initial_backup)
                 with reopened.transaction(read_only=True) as db:
-                    self.assertEqual(db.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()[0],'2')
+                    self.assertEqual(db.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()[0],'3')
                     self.assertEqual(db.execute('SELECT count(*) FROM deliveries').fetchone()[0],4)
             finally:
                 reopened.close()
@@ -105,6 +105,38 @@ class StoreTests(unittest.TestCase):
                 self.assertFalse(Path(str(path)+'.v1.bak').exists())
             finally:
                 db.close()
+
+    def test_web_upgrade_preserves_rooms_and_takes_v2_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/'rooms.db'
+            old = Store(path)
+            d = Domain(old)
+            token = d.mint_agent('root','admin')
+            admin = d.lookup(hashlib.sha256(token.encode()).hexdigest())
+            d.create_room(admin,'kept',['a','b'])
+            d.inject(admin,'kept','*','notice','retained content')
+            with old.transaction() as db:
+                db.execute('DROP TABLE sessions')
+                db.execute('DROP TABLE login_attempts')
+                db.execute("DELETE FROM settings WHERE key='web_csrf_key'")
+                db.execute("UPDATE settings SET value='2' WHERE key='schema_version'")
+            upgraded = Store(path)
+            try:
+                self.assertEqual(Domain(upgraded).room_fetch(admin,'kept')[0]['text'],'retained content')
+                with upgraded.transaction(read_only=True) as db:
+                    self.assertEqual(db.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()[0],'3')
+                    key = db.execute("SELECT value FROM settings WHERE key='web_csrf_key'").fetchone()[0]
+                    self.assertEqual(len(key),64)
+                backup = sqlite3.connect(str(path)+'.v2.bak')
+                try:
+                    self.assertEqual(backup.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()[0],'2')
+                    self.assertEqual(backup.execute('SELECT text FROM messages').fetchone()[0],'retained content')
+                    self.assertIsNone(backup.execute("SELECT name FROM sqlite_master WHERE name='sessions'").fetchone())
+                finally:
+                    backup.close()
+            finally:
+                upgraded.close()
+                old.close()
 
     def test_read_transaction_does_not_reserve_writer_lock(self):
         with tempfile.TemporaryDirectory() as tmp:

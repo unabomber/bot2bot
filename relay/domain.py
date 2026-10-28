@@ -5,6 +5,8 @@ Administrative methods must only be exposed to an authenticated admin.
 """
 import hashlib
 import json
+import hmac
+import math
 import re
 import secrets
 import time
@@ -628,3 +630,114 @@ class Domain:
             if room=='default':
                 db.execute('UPDATE threads SET used=0 WHERE id IN (SELECT storage_key FROM room_threads WHERE room_id=? AND label=?)',(room,thread))
             self._event(db,room,actor['name'],'reset-thread')
+
+    @staticmethod
+    def _session_hash(session):
+        if not isinstance(session,str) or not re.fullmatch(r'[A-Za-z0-9_-]{43}',session):
+            return None
+        return hashlib.sha256(session.encode('ascii')).hexdigest()
+
+    @staticmethod
+    def _csrf(db, session):
+        key = db.execute("SELECT value FROM settings WHERE key='web_csrf_key'").fetchone()[0]
+        return hmac.new(bytes.fromhex(key),session.encode('ascii'),hashlib.sha256).hexdigest()
+
+    @staticmethod
+    def _live_session(db, digest, now):
+        return db.execute("SELECT s.* FROM sessions s JOIN agents a ON a.name=s.admin_name "
+            "WHERE s.session_hash=? AND a.active=1 AND a.role='admin' AND a.token_hash=s.credential_hash "
+            "AND s.expires_at>? AND s.last_seen>?",(digest,now,now-1800)).fetchone()
+
+    @staticmethod
+    def _purge_web(db, now):
+        sessions = db.execute("DELETE FROM sessions WHERE expires_at<=? OR last_seen<=? OR NOT EXISTS "
+            "(SELECT 1 FROM agents a WHERE a.name=sessions.admin_name AND a.active=1 AND a.role='admin' AND a.token_hash=sessions.credential_hash)",
+            (now,now-1800)).rowcount
+        attempts = db.execute('DELETE FROM login_attempts WHERE attempted<=?',(now-3600,)).rowcount
+        return {'sessions':sessions,'attempts':attempts}
+
+    def session_create(self, token_hash, client_key):
+        """Authenticate and atomically apply persisted failure throttles.
+
+        Invalid credentials commit their failure row before the generic 401 is
+        raised. No submitted credential or credential hash is logged on failure.
+        """
+        _string(client_key,'client address',256)
+        peer = hashlib.sha256(('peer:'+client_key).encode()).hexdigest()
+        now = time.time()
+        failed = False
+        with self.store.transaction() as db:
+            self._purge_web(db,now)
+            retry = 0
+            for condition,args,window,limit in [
+                ('peer_hash=? AND attempted>?',(peer,now-900),900,5),
+                ('attempted>?',(now-3600,),3600,30),
+            ]:
+                row = db.execute('SELECT count(*),min(attempted) FROM login_attempts WHERE '+condition,args).fetchone()
+                if row[0]>=limit:
+                    retry = max(retry,max(1,math.ceil(row[1]+window-now)))
+            if retry:
+                error = DomainError(429,'login temporarily rate limited')
+                error.retry_after = retry
+                raise error
+            admin = None
+            if isinstance(token_hash,str) and re.fullmatch(r'[0-9a-f]{64}',token_hash):
+                admin = db.execute("SELECT name,token_hash FROM agents WHERE token_hash=? AND role='admin' AND active=1",(token_hash,)).fetchone()
+            if admin is None:
+                db.execute('INSERT INTO login_attempts(peer_hash,attempted) VALUES (?,?)',(peer,now))
+                failed = True
+            else:
+                session = secrets.token_urlsafe(32)
+                expires = now+28800
+                db.execute('INSERT INTO sessions(session_hash,admin_name,credential_hash,created,last_seen,expires_at,peer_hash) VALUES (?,?,?,?,?,?,?)',
+                    (self._session_hash(session),admin['name'],admin['token_hash'],now,now,expires,peer))
+                result = {'session':session,'csrf':self._csrf(db,session),'expires_at':expires}
+        if failed:
+            raise DomainError(401,'invalid credentials')
+        return result
+
+    def session_validate(self, session, csrf=None, mutation=False):
+        digest = self._session_hash(session)
+        if digest is None:
+            return None
+        if type(mutation) is not bool:
+            raise DomainError(400,'invalid mutation flag')
+        now = time.time()
+        with self.store.transaction(read_only=True) as db:
+            row = self._live_session(db,digest,now)
+            if row is None:
+                return None
+            expected = self._csrf(db,session)
+            if mutation and (not isinstance(csrf,str) or not re.fullmatch(r'[0-9a-f]{64}',csrf) or not hmac.compare_digest(csrf,expected)):
+                raise DomainError(403,'invalid CSRF token')
+            touch = row['last_seen']<=now-60
+            result = {'principal':{'name':row['admin_name'],'role':'admin','room':None,'generation':1},
+                      'expires_at':row['expires_at'],'csrf':expected}
+        if touch:
+            with self.store.transaction() as db:
+                # Recheck expiry and the bound admin credential under the write lock.
+                row = self._live_session(db,digest,now)
+                if row is None:
+                    return None
+                db.execute('UPDATE sessions SET last_seen=max(last_seen,?) WHERE session_hash=?',(now,digest))
+        return result
+
+    def session_revoke(self, session):
+        digest = self._session_hash(session)
+        if digest is None:
+            return 0
+        with self.store.transaction() as db:
+            return db.execute('DELETE FROM sessions WHERE session_hash=?',(digest,)).rowcount
+
+    def session_revoke_all(self, session):
+        digest = self._session_hash(session)
+        now = time.time()
+        with self.store.transaction() as db:
+            row = self._live_session(db,digest,now) if digest else None
+            if row is None:
+                raise DomainError(401,'invalid session')
+            return db.execute('DELETE FROM sessions WHERE admin_name=?',(row['admin_name'],)).rowcount
+
+    def session_purge(self):
+        with self.store.transaction() as db:
+            return self._purge_web(db,time.time())

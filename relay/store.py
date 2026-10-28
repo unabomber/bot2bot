@@ -4,6 +4,7 @@ import sqlite3
 import threading
 from pathlib import Path
 import time
+import secrets
 
 
 SCHEMA = """
@@ -64,6 +65,20 @@ CREATE INDEX IF NOT EXISTS delivery_reader ON deliveries(room_id,member,message_
 CREATE INDEX IF NOT EXISTS room_messages ON messages(room_id,id);
 """
 
+WEB_SCHEMA = """
+CREATE TABLE IF NOT EXISTS sessions (
+ session_hash TEXT PRIMARY KEY, admin_name TEXT NOT NULL REFERENCES agents(name),
+ credential_hash TEXT NOT NULL, created REAL NOT NULL, last_seen REAL NOT NULL,
+ expires_at REAL NOT NULL, peer_hash TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS session_admin ON sessions(admin_name);
+CREATE TABLE IF NOT EXISTS login_attempts (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, peer_hash TEXT NOT NULL, attempted REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS login_peer_time ON login_attempts(peer_hash,attempted);
+CREATE INDEX IF NOT EXISTS login_global_time ON login_attempts(attempted);
+"""
+
 
 class Store:
     def __init__(self, path):
@@ -86,10 +101,10 @@ class Store:
         if 'settings' in tables:
             row = self.connection.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()
             version = int(row[0]) if row else None
-        if version is not None and version > 2:
+        if version is not None and version > 3:
             raise RuntimeError('database schema is newer than this relay supports')
-        if tables and version != 2 and str(path) != ':memory:':
-            backup = Path(str(path) + '.v1.bak')
+        if tables and version != 3 and str(path) != ':memory:':
+            backup = Path(str(path) + ('.v2.bak' if version==2 else '.v1.bak'))
             if not backup.exists():
                 # SQLite backup includes committed WAL pages, unlike copying the main file.
                 target = sqlite3.connect(str(backup))
@@ -100,12 +115,15 @@ class Store:
         self.connection.executescript(SCHEMA)
         with self.transaction() as db:
             current = db.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()
-            if current and int(current[0]) > 2:
+            if current and int(current[0]) > 3:
                 raise RuntimeError('database schema is newer than this relay supports')
             if 'display_path' not in {r['name'] for r in db.execute('PRAGMA table_info(claims)')}:
                 db.execute('ALTER TABLE claims ADD COLUMN display_path TEXT')
+            if current and int(current[0]) == 3:
+                return
             if current and int(current[0]) == 2:
                 self._room_sequences(db)
+                self._web_tables(db)
                 return
             for table in ('threads', 'messages', 'tasks', 'claims'):
                 if 'room_id' not in {r['name'] for r in db.execute(f'PRAGMA table_info({table})')}:
@@ -127,7 +145,15 @@ class Store:
             db.execute("INSERT OR IGNORE INTO deliveries SELECT 'default',id,sender FROM messages")
             db.execute("INSERT OR IGNORE INTO deliveries SELECT 'default',id,recipient FROM messages")
             self._room_sequences(db)
-            db.execute("INSERT OR REPLACE INTO settings VALUES ('schema_version','2')")
+            self._web_tables(db)
+
+    @staticmethod
+    def _web_tables(db):
+        for statement in WEB_SCHEMA.split(';'):
+            if statement.strip():
+                db.execute(statement)
+        db.execute("INSERT OR IGNORE INTO settings VALUES ('web_csrf_key',?)",(secrets.token_hex(32),))
+        db.execute("INSERT OR REPLACE INTO settings VALUES ('schema_version','3')")
 
     @staticmethod
     def _room_sequences(db):
