@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE TABLE IF NOT EXISTS claims (
     task_id INTEGER NOT NULL REFERENCES tasks(id), path TEXT NOT NULL,
+    display_path TEXT,
     PRIMARY KEY(task_id, path)
 );
 """
@@ -43,11 +44,15 @@ class Store:
         self.connection.execute('PRAGMA journal_mode=WAL')
         self.connection.execute('PRAGMA synchronous=FULL')
         self.connection.executescript(SCHEMA)
+        # Upgrade databases created before original claim spelling was retained.
+        with self.transaction() as db:
+            if 'display_path' not in {r['name'] for r in db.execute('PRAGMA table_info(claims)')}:
+                db.execute('ALTER TABLE claims ADD COLUMN display_path TEXT')
 
     @contextmanager
-    def transaction(self):
+    def transaction(self, *, read_only=False):
         with self.lock:
-            self.connection.execute('BEGIN IMMEDIATE')
+            self.connection.execute('BEGIN' if read_only else 'BEGIN IMMEDIATE')
             try:
                 yield self.connection
                 self.connection.execute('COMMIT')

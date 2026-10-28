@@ -95,14 +95,17 @@ class Domain:
     def lookup(self, token_hash):
         if not isinstance(token_hash, str) or len(token_hash) != 64:
             return None
-        with self.store.transaction() as db:
+        with self.store.transaction(read_only=True) as db:
             row = db.execute('SELECT name,role FROM agents WHERE token_hash=? AND active=1',
                              (token_hash,)).fetchone()
             return dict(row) if row else None
 
     def revoke(self, name):
         with self.store.transaction() as db:
-            self._agent(db, name)
+            agent = self._agent(db, name)
+            if agent['role'] == 'admin' and db.execute(
+                    "SELECT count(*) FROM agents WHERE role='admin' AND active=1").fetchone()[0] <= 1:
+                raise DomainError(409, 'cannot revoke the last active administrator')
             db.execute('UPDATE agents SET active=0 WHERE name=?', (name,))
 
     @staticmethod
@@ -158,7 +161,7 @@ class Domain:
         _integer(limit, 'limit', 1, 1000)
         if not isinstance(agent, dict) or not {'name', 'role'} <= set(agent):
             raise DomainError(403, 'invalid principal')
-        with self.store.transaction() as db:
+        with self.store.transaction(read_only=True) as db:
             actual = self._agent(db, agent.get('name'))
             if actual['role'] != agent.get('role'):
                 raise DomainError(403, 'invalid principal role')
@@ -174,7 +177,7 @@ class Domain:
     @staticmethod
     def _task(db, row):
         task = dict(row)
-        task['files'] = [r[0] for r in db.execute('SELECT path FROM claims WHERE task_id=? ORDER BY path',
+        task['files'] = [r[0] for r in db.execute('SELECT COALESCE(display_path,path) FROM claims WHERE task_id=? ORDER BY path',
                                                 (row['id'],))]
         return task
 
@@ -192,8 +195,9 @@ class Domain:
                 if any(_overlap(p, row['path']) for p in paths):
                     raise DomainError(409, f"file overlaps task {row['task_id']}")
             cur = db.execute('INSERT INTO tasks(owner,title) VALUES (?,?)', (owner, title))
-            db.executemany('INSERT INTO claims(task_id,path) VALUES (?,?)',
-                           [(cur.lastrowid, p) for p in paths])
+            db.executemany('INSERT INTO claims(task_id,path,display_path) VALUES (?,?,?)',
+                           [(cur.lastrowid, key, original.replace('\\', '/').rstrip('/'))
+                            for key, original in zip(paths, files)])
             return self._task(db, db.execute('SELECT * FROM tasks WHERE id=?',
                                             (cur.lastrowid,)).fetchone())
 
@@ -218,7 +222,9 @@ class Domain:
                                  for p in branch.split('/')):
             raise DomainError(400, 'invalid branch')
         with self.store.transaction() as db:
-            self._owned(db, owner, id)
+            task = self._owned(db, owner, id)
+            if task['status'] != 'open':
+                raise DomainError(409, 'only open tasks can be finished')
             db.execute("UPDATE tasks SET status='done',branch=? WHERE id=?", (branch, id))
             return self._task(db, db.execute('SELECT * FROM tasks WHERE id=?', (id,)).fetchone())
 
@@ -230,11 +236,11 @@ class Domain:
             return self._task(db, db.execute('SELECT * FROM tasks WHERE id=?', (id,)).fetchone())
 
     def tasks(self):
-        with self.store.transaction() as db:
+        with self.store.transaction(read_only=True) as db:
             return [self._task(db, row) for row in db.execute('SELECT * FROM tasks ORDER BY id')]
 
     def status(self):
-        with self.store.transaction() as db:
+        with self.store.transaction(read_only=True) as db:
             owners = {}
             for task in db.execute('SELECT * FROM tasks'):
                 owner = owners.setdefault(task['owner'], {'tasks': 0, 'done': 0, 'files': 0})
@@ -259,7 +265,7 @@ class Domain:
             db.execute("UPDATE settings SET value=? WHERE key='paused'", ('1' if paused else '0',))
 
     def is_paused(self):
-        with self.store.transaction() as db:
+        with self.store.transaction(read_only=True) as db:
             return db.execute("SELECT value FROM settings WHERE key='paused'").fetchone()[0] == '1'
 
     def reset_thread(self, thread):
