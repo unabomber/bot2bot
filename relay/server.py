@@ -34,6 +34,7 @@ class Hub:
         self.domain = domain
         self.cv = threading.Condition()
         self.waits, self.buckets = {}, {}
+        self.web = None
 
     def take(self, name):
         """Token bucket; returns seconds to wait when empty, else 0."""
@@ -157,23 +158,32 @@ def make_handler(hub):
     class Handler(BaseHTTPRequestHandler):
         timeout = SOCKET_TIMEOUT
         unread = 0
+        framing_failed = False
 
         def log_message(self, *args):
             pass
 
         def reply(self, code, body, headers=(), ctype='application/json'):
-            data = body.encode() if isinstance(body, str) else json.dumps(body).encode()
+            if isinstance(body, bytes):
+                data = body
+            else:
+                data = body.encode() if isinstance(body, str) else json.dumps(body).encode()
             self.send_response(code)
             self.send_header('content-type', ctype)
             self.send_header('content-length', str(len(data)))
-            self.send_header('cache-control', 'no-store')
-            self.send_header('x-content-type-options', 'nosniff')
+            given = {key.lower() for key, _ in headers}
+            for key, value in (('cache-control', 'no-store'), ('x-content-type-options', 'nosniff')):
+                if key not in given:  # the web UI supplies its own security headers; never duplicate
+                    self.send_header(key, value)
             for key, value in headers:
                 self.send_header(key, value)
             self.end_headers()
             self.wfile.write(data)
 
         def fail(self, code, message, headers=()):
+            path = urlparse(self.path).path
+            if hub.web is not None and (path == '/ui' or path.startswith('/ui/')):
+                headers = [*headers, *hub.web.sec.headers()]  # every /ui error carries the same security headers
             self.reply(code, {'error': message, 'code': code}, headers)
 
         def framing(self):
@@ -213,6 +223,21 @@ def make_handler(hub):
                     break
                 left -= len(chunk)
 
+        def discard_pending(self):
+            """Best-effort, bounded read of bytes already in flight after a framing error. Closing a socket that still holds
+            unread data makes some stacks (notably Windows) reset the connection and lose the error reply."""
+            self.close_connection = True
+            try:
+                self.connection.settimeout(0.25)
+                total = 0
+                while total < DRAIN_LIMIT:
+                    chunk = self.connection.recv(65536)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+            except OSError:
+                pass
+
         def match(self, method, path):
             for m, pattern, handler, roles in ROUTES:
                 found = pattern.fullmatch(path) if m == method else None
@@ -221,9 +246,17 @@ def make_handler(hub):
             return None
 
         def handle_request(self, method):
-            self.unread = self.framing()
+            try:
+                self.unread = self.framing()
+            except DomainError:
+                self.framing_failed = True  # body length is unknowable: reply, then discard what the client already sent
+                raise
             url = urlparse(self.path)
             q = parse_qs(url.query)
+            if url.path == '/ui' or url.path.startswith('/ui/'):
+                if hub.web is None:
+                    return self.fail(404, 'not found')
+                return hub.web.dispatch(self, method.upper(), url.path, q, _int)
             if 'key' in q or 'token' in q:
                 return self.fail(400, 'credentials in the URL are not accepted; use the Authorization header')
             header = self.headers.get('authorization')
@@ -259,10 +292,16 @@ def make_handler(hub):
             except DomainError as err:
                 retry = getattr(err, 'retry_after', 60 if err.code == 429 else None)
                 self.fail(err.code, err.message, [('retry-after', str(retry))] if retry else ())
+                if self.framing_failed:
+                    self.discard_pending()
             except (BrokenPipeError, ConnectionResetError, TimeoutError):
                 self.close_connection = True
-            except Exception:
-                self.fail(500, 'internal error')
+            except Exception as err:
+                status = getattr(err, 'status', None)  # web_security.GuardError(status, message)
+                if isinstance(status, int) and 400 <= status < 500:
+                    self.fail(status, getattr(err, 'message', 'request rejected'))
+                else:
+                    self.fail(500, 'internal error')
 
         def do_GET(self):
             self.dispatch('get')
@@ -442,7 +481,24 @@ def make_handler(hub):
     return Handler
 
 
-def make_server(domain, host='127.0.0.1', port=8765):
-    server = ThreadingHTTPServer((host, port), make_handler(Hub(domain)))
+LOOPBACK = ('127.0.0.1', 'localhost', '::1')
+
+
+def make_server(domain, host='127.0.0.1', port=8765, public_origin=None, ui=True):
+    """Build the relay server. The web UI is served only when ui is true; its trusted origin is configured,
+    never derived from request headers (public_origin is required for non-loopback binds)."""
+    hub = Hub(domain)
+    server = ThreadingHTTPServer((host, port), make_handler(hub))
     server.daemon_threads = True
+    server.hub = hub
+    if ui:
+        from .web import Web
+        from .web_security import WebSecurity
+        if public_origin is None:
+            if host not in LOOPBACK:
+                server.server_close()
+                raise ValueError('--public-origin is required to serve the web UI on a non-loopback address')
+            public_origin = f'http://{host if host != "::1" else "[::1]"}:{server.server_address[1]}'
+        hub.web = Web(hub, WebSecurity(public_origin))
+        server.public_origin = public_origin
     return server

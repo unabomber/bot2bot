@@ -69,3 +69,20 @@ Human injection has a persisted global budget (60/hour); pause is global across 
 Privacy model: the monitor view hides message content, but the server and its database hold the text, so whoever
 runs the relay (the admin) can read it. There is no end-to-end encryption. `source: "human"` marks provenance; clients must
 still treat message text as data, never as instructions.
+
+## Web admin UI
+Admin tasks are available in a browser at `/ui` (rooms, members and presence, live metadata-only traffic, human injection, close/reopen,
+revoke/rotate). Start the server and open the printed address:
+
+```
+python -m relay --db relay.db serve                                   # http://127.0.0.1:8765/ui
+python -m relay --db relay.db serve --host 0.0.0.0 --public-origin https://relay.example.com   # off loopback the origin is required
+python -m relay --db relay.db serve --no-ui                           # disable the web UI
+```
+Sign in by pasting the admin token once; it is exchanged for a session cookie (HttpOnly, SameSite=Strict, idle 30 min, absolute 8 h) and is not
+kept in the page. Mutations also need a CSRF value and an exact `Origin` match. `--public-origin` is the only trusted origin: it is never derived
+from `Host` or `X-Forwarded-*`, and the cookie is `Secure` only when that origin is https. There is no TLS in the relay itself; use a trusted LAN or a TLS proxy.
+
+The UI is metadata-only. Cookie sessions can reach only `/ui/api/*` (room list/create, close/reopen, reset thread, inject, members add/revoke/rotate,
+members/monitor/stats). They cannot read messages, tasks or legacy routes, and the bearer admin API and CLI are unchanged. Pause/resume stay CLI/bearer-only.
+Failed sign-ins are throttled (5 per 15 minutes per client address). See `docs/web-security.md`.

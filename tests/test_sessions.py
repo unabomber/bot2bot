@@ -162,3 +162,26 @@ class SessionTests(unittest.TestCase):
     def test_invalid_session_shapes_fail_closed(self):
         for value in (None,1,[],{},'','☃','x'*42,'x'*44,'x'*43):
             self.assertIsNone(self.d.session_validate(value))
+
+    def test_browser_admin_resets_by_public_thread_number_without_content_labels(self):
+        self.d = Domain(self.store,thread_budget=1)
+        session = self.login()
+        admin = self.d.session_validate(session['session'])['principal']
+        principals = {}
+        for room in ('one','two'):
+            created = self.d.create_room(admin,room,['a','b'])
+            token = next(m['token'] for m in created['members'] if m['name']=='a')
+            principals[room] = self.d.lookup(self.digest(token))
+            self.d.room_post(principals[room],room,['b'],'SECRET_LABEL','message')
+        event = self.d.monitor(admin,'one')[0]
+        self.assertNotIn('SECRET_LABEL',str(event))
+        self.assertEqual(event['thread_no'],1)
+        self.d.reset_room_thread(admin,'one',event['thread_no'])
+        self.d.room_post(principals['one'],'one',['b'],'SECRET_LABEL','after reset')
+        self.error(409,self.d.room_post,principals['two'],'two',['b'],'SECRET_LABEL','still blocked')
+        self.error(403,self.d.reset_room_thread,principals['one'],'one',1)
+        self.error(404,self.d.reset_room_thread,admin,'one',2)
+        for bad in (0,-1,True,1.5):
+            self.error(400,self.d.reset_room_thread,admin,'one',bad)
+        self.d.reset_room_thread(admin,'two','SECRET_LABEL')  # operator label API remains compatible
+        self.d.room_post(principals['two'],'two',['b'],'SECRET_LABEL','operator reset')
