@@ -191,5 +191,47 @@ class RoomServerTests(unittest.TestCase):
         self.assertEqual(self.call('POST', '/admin/rooms', 'root', {'name': 'alpha'})[0], 409)
 
 
+    def test_legacy_routes_reject_room_credentials(self):
+        # same identity name exists in default (legacy) and in alpha; the alpha token must not touch legacy state
+        self.domain.mint_agent('twin', 'agent')
+        self.call('POST', '/admin/rooms/alpha/members', 'root', {'name': 'twin'})
+        status, body = self.call('POST', '/admin/rooms/alpha/members/twin/rotate', 'root')
+        self.tok['twin_alpha'] = body['token']
+        before = (self.call('GET', '/tasks', 'root')[1], self.call('GET', '/status', 'root')[1])
+        for method, path, payload in [('GET', '/tasks', None), ('GET', '/status', None), ('GET', '/messages', None),
+                                      ('GET', '/wait?timeout=0', None), ('GET', '/observe', None),
+                                      ('POST', '/say', {'to': 'old', 'text': 'spoof'}),
+                                      ('POST', '/task', {'title': 'spoof', 'files': ['z.py']}),
+                                      ('POST', '/done', {'id': 1, 'branch': 'twin/x'}),
+                                      ('POST', '/release', {'id': 1}), ('POST', '/admin/pause', {})]:
+            self.assertIn(self.call(method, path, 'twin_alpha', payload)[0], (403,), path)
+        after = (self.call('GET', '/tasks', 'root')[1], self.call('GET', '/status', 'root')[1])
+        self.assertEqual(before, after)
+        self.assertFalse(self.domain.is_paused())
+
+    def test_rate_limit_is_per_room_identity(self):
+        self.tok['same_default'] = self.domain.mint_agent('same', 'agent')
+        self.call('POST', '/admin/rooms/alpha/members', 'root', {'name': 'same'})
+        self.tok['same_alpha'] = self.call('POST', '/admin/rooms/alpha/members/same/rotate', 'root')[1]['token']
+        for _ in range(40):
+            self.call('GET', '/status', 'same_default')
+        self.assertEqual(self.call('GET', '/rooms/alpha/messages', 'same_alpha')[0], 200)
+
+    def test_close_wakes_open_wait_promptly(self):
+        result = {}
+        start = time.monotonic()
+        t = threading.Thread(target=lambda: result.update(r=self.call('GET', '/rooms/alpha/wait?timeout=30', 'b')))
+        t.start()
+        time.sleep(0.5)
+        self.assertEqual(self.call('POST', '/admin/rooms/alpha/close', 'root')[0], 200)
+        t.join(8)
+        self.assertFalse(t.is_alive())
+        self.assertEqual((result['r'][0], result['r'][1]['closed'], result['r'][1]['messages']), (200, True, []))
+        self.assertLess(time.monotonic() - start, 8)
+
+    def test_monitor_can_heartbeat(self):
+        self.assertEqual(self.call('POST', '/rooms/alpha/heartbeat', 'eye')[0], 200)
+
+
 if __name__ == '__main__':
     unittest.main()

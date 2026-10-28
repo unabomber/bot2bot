@@ -16,6 +16,7 @@ DRAIN_LIMIT = 1024 * 1024
 SOCKET_TIMEOUT = 30
 BUCKET_BURST, BUCKET_RATE = 20, 5.0
 DEFAULT_ROOM = 'default'
+LEGACY_PREFIXES = ('legacy_', 'admin_pause', 'admin_resume')
 
 
 class Busy(DomainError):
@@ -50,9 +51,10 @@ class Hub:
         with self.cv:
             return self.waits.get((room, name), 0)
 
-    def wait_for(self, room, name, fetch, after, timeout):
+    def wait_for(self, room, name, fetch, closed, after, timeout):
         """Long poll. fetch(after) returns rows (it revalidates credentials on every call and
-        raises DomainError on revocation). Returns (messages from others, cursor)."""
+        raises DomainError on revocation); closed() says whether the room stopped accepting writes.
+        Returns (messages from others, cursor, room_closed)."""
         key, end = (room, name), time.monotonic() + timeout
         with self.cv:
             if self.waits.get(key, 0) >= MAX_WAITS_PER_AGENT:
@@ -65,11 +67,13 @@ class Hub:
                     after = rows[-1]['id']
                     mine = [m for m in rows if m['from'] != name]
                     if mine:
-                        return mine, after
+                        return mine, after, False
                     continue
+                if closed():
+                    return [], after, True
                 left = end - time.monotonic()
                 if left <= 0:
-                    return [], after
+                    return [], after, False
                 with self.cv:
                     self.cv.wait(min(left, 2.0))
         finally:
@@ -113,7 +117,7 @@ ROUTES = [(m, re.compile(p), h, r) for m, p, h, r in [
     ('POST', rf'/rooms/{ROOM}/say', 'room_say', AGENT),
     ('GET', rf'/rooms/{ROOM}/wait', 'room_wait', AGENT),
     ('GET', rf'/rooms/{ROOM}/messages', 'room_messages', CONTENT),
-    ('POST', rf'/rooms/{ROOM}/heartbeat', 'room_heartbeat', AGENT),
+    ('POST', rf'/rooms/{ROOM}/heartbeat', 'room_heartbeat', frozenset({'agent', 'monitor'})),
     ('GET', rf'/rooms/{ROOM}/members', 'room_members', METADATA),
     ('GET', rf'/rooms/{ROOM}/monitor', 'room_monitor', METADATA),
     ('GET', rf'/rooms/{ROOM}/stats', 'room_stats', METADATA),
@@ -227,7 +231,7 @@ def make_handler(hub):
             if who is None:
                 return self.fail(401, 'missing or invalid token', [('www-authenticate', 'Bearer')])
             self.token_hash = hash_token(bearer_token(header))
-            delay = hub.take(who['name'])
+            delay = hub.take((who.get('room'), who['name']))
             if delay:
                 return self.fail(429, 'rate limit exceeded', [('retry-after', str(int(delay) + 1))])
             entry = self.match(method.upper(), url.path)
@@ -239,6 +243,8 @@ def make_handler(hub):
             room = params.get('room')
             if room is not None and who.get('room') not in (None, room):
                 return self.fail(403, 'credential is not valid in this room')
+            if room is None and handler.startswith(LEGACY_PREFIXES) and who.get('room') not in (None, DEFAULT_ROOM):
+                return self.fail(403, 'legacy routes accept default-room credentials only')
             body = self.body() if method == 'post' else {}
             if 'from' in body and body['from'] != who['name']:
                 return self.fail(400, 'from does not match authenticated identity')
@@ -265,13 +271,25 @@ def make_handler(hub):
             self.dispatch('post')
 
         # ---- helpers ----
-        def wait_reply(self, who, q, room, fetch):
+        def wait_reply(self, who, q, room):
+            """Long poll for `room`. Every poll re-authenticates the bearer token, so revocation,
+            rotation and room closure are noticed within one wake-up interval."""
+            def fetch(after):
+                principal = self.reauth()
+                if principal.get('room') not in (None, room):
+                    raise DomainError(403, 'credential is not valid in this room')
+                if room == DEFAULT_ROOM and 'room' not in principal:
+                    return domain.fetch(principal, after, 100)
+                return domain.room_fetch(principal, room, after, 100)
+
+            def closed():
+                return domain.room_state(self.reauth(), room)['status'] == 'closed'
+
             after = _int(q, 'after', 0)
-            msgs, cursor = hub.wait_for(room, who['name'], fetch, after, _int(q, 'timeout', MAX_WAIT, 0, MAX_WAIT))
-            out = {'messages': msgs, 'cursor': cursor, 'timeout': not msgs}
-            if room != DEFAULT_ROOM and not msgs:
-                out['closed'] = domain.room_state(who, room)['status'] == 'closed'
-            self.reply(200, out)
+            msgs, cursor, is_closed = hub.wait_for(room, who['name'], fetch, closed, after,
+                                                   _int(q, 'timeout', MAX_WAIT, 0, MAX_WAIT))
+            self.reply(200, {'messages': msgs, 'cursor': cursor, 'timeout': not msgs and not is_closed,
+                             'closed': is_closed})
 
         def say_args(self, body):
             if not isinstance(body.get('text'), str):
@@ -287,7 +305,7 @@ def make_handler(hub):
             return principal
 
         def do_legacy_wait(self, who, q, body):
-            self.wait_reply(who, q, DEFAULT_ROOM, lambda after: domain.fetch(self.reauth(), after, 100))
+            self.wait_reply(who, q, DEFAULT_ROOM)
 
         def do_legacy_messages(self, who, q, body):
             rows = domain.fetch(who, _int(q, 'after', 0), _int(q, 'limit', 100, 1, 1000))
@@ -341,11 +359,7 @@ def make_handler(hub):
             self.reply(200, {'id': env['id']})
 
         def do_room_wait(self, who, q, body, room):
-            def fetch(after):
-                # principals without a generation (default room) must re-authenticate on every poll
-                principal = who if 'generation' in who else self.reauth()
-                return domain.room_fetch(principal, room, after, 100)
-            self.wait_reply(who, q, room, fetch)
+            self.wait_reply(who, q, room)
 
         def do_room_messages(self, who, q, body, room):
             after = _int(q, 'after', 0)
