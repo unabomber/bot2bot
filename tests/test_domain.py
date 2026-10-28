@@ -68,6 +68,8 @@ class DomainTests(unittest.TestCase):
         self.error(400, self.d.post, 'openai', 'human', 'new', 'admin')
         self.error(403, self.d.post, 'watch', 'claude', 'new', 'observer write')
         self.error(400, self.d.post, 'openai', 'claude', 'new', '\ud800')
+        self.error(400, self.d.post, 'openai', 'claude', '\ud800', 'text')
+        self.error(400, self.d.create_task, 'openai', '\ud800', ['file.py'])
         self.error(413, self.d.post, 'openai', 'claude', 'new', 'é' * 4097)
         self.d.post('openai', 'claude', 'new', 'é' * 4096)
         for bad in [-1, True, '1', 2**64]:
@@ -119,6 +121,7 @@ class DomainTests(unittest.TestCase):
             self.error(409, self.d.create_task, owner, 'parent', ['relay'])
         self.error(403, self.d.finish_task, 'claude', task['id'], 'claude/wrong')
         self.error(400, self.d.finish_task, 'openai', task['id'], 'main')
+        self.error(400, self.d.finish_task, 'openai', task['id'], 'openai/x..y')
         done = self.d.finish_task('openai', task['id'], 'openai/store')
         self.assertEqual(done['status'], 'done')
         self.error(409, self.d.create_task, 'claude', 'still held', ['relay'])

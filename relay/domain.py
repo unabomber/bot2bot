@@ -18,6 +18,12 @@ class DomainError(Exception):
 def _string(value, field, maximum=128):
     if not isinstance(value, str) or not value.strip() or len(value) > maximum:
         raise DomainError(400, f'invalid {field}')
+    try:
+        value.encode('utf-8')
+    except UnicodeEncodeError:
+        raise DomainError(400, f'{field} must be valid Unicode') from None
+    if any(ord(char) < 32 for char in value):
+        raise DomainError(400, f'invalid control character in {field}')
     return value
 
 
@@ -208,7 +214,8 @@ class Domain:
         _string(branch, 'branch', 256)
         if not branch.startswith(owner + '/') or not re.fullmatch(r'[A-Za-z0-9_./-]+', branch):
             raise DomainError(400, 'branch must belong to task owner')
-        if any(p in ('', '.', '..') for p in branch.split('/')):
+        if '..' in branch or any(not p or p.startswith('.') or p.endswith(('.', '.lock'))
+                                 for p in branch.split('/')):
             raise DomainError(400, 'invalid branch')
         with self.store.transaction() as db:
             self._owned(db, owner, id)
