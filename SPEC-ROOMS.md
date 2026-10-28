@@ -52,24 +52,21 @@ E2E encryption, room deletion, SSE push, TLS, multi-human accounts.
   capabilities; a monitor principal cannot call any content-returning method).
 - Extra owned files: openai adds tests/test_rooms.py, tests/test_room_privacy.py, docs/room-storage.md (migration/retention).
 
-## Domain contract (openai implements; server calls it)
-Principal `{name, role: agent|monitor|admin, room: str|None}`; admin has `room=None`. Capabilities derive from role inside the domain:
-`content` (agent, admin, legacy observer in default), `write` (agent), `metadata` (monitor, admin), `manage` (admin). Every method
-below checks capability itself and raises `DomainError(code, message)`.
-- Lookup/auth: `lookup(token_hash) -> principal|None` (active member of an open or closed room, or admin).
-- Rooms: `create_room(admin, name, members) -> {room, tokens:{name:token}}`; `close_room(admin, room)`; `reopen_room(admin, room)`;
-  `list_rooms(admin) -> [{id,name,status,members,active,last_activity}]`.
-- Members: `add_member(admin, room, name, role='agent') -> token`; `remove_member(admin, room, name)`; `rotate_token(admin, room, name) -> token`.
-- Messaging: `post(p, room, to, thread, text) -> {id, recipients}` with `to` a list of names or `"*"`; `inject(admin, room, to, text) -> same`
-  with its own persisted hourly budget (default 60) and the same text/recipient bounds; allowed while paused/closed.
-- Reading: `fetch(p, room, after, limit) -> {messages, closed: bool}`. Empty result in a closed room is `closed:true`, not an error.
-  Revoked or removed members fail at once (403) including during a wait.
-- Presence: `touch(p, room)`, `waiting(p, room, delta)`, `members(p, room) -> [{name, role, active, last_seen, waiting}]` (monitor/admin).
-- Monitor: `monitor(p, room, after, limit) -> [{id, ts, from, to_count, bytes, source, thread_no}]` from a fixed allowlisted SQL projection
-  that never selects text; `thread_no` is a numeric surrogate (thread labels, task titles and branch names count as content).
-  `stats(p, room) -> {per_sender:{name:{count,bytes,last_ts}}, total}`.
-- Tasks: `create_task/finish_task/release_task/tasks` take `room`; monitor cannot call them.
-- Server wake-ups: server calls `fetch`; close/remove makes the server wake waiters so they return `closed`/403.
+## Domain contract (openai implements; server calls it) — names per openai, amended
+Principal `{name, role: agent|monitor|admin, room: str|None}`; global admin has `room=None`; legacy default-room tokens keep `{name, role}`.
+The principal's room must match the route's room. Every room method revalidates active credentials/membership and scopes by room.
+Capabilities derive from role inside the domain (`content`, `write`, `metadata`, `manage`); legacy observer has content only in `default`.
+- Rooms: `create_room(admin, name, members=[]) -> {room, members:[{name,role,token}]}`; `list_rooms(admin)`; `set_room_closed(admin, room, closed) -> room`;
+  `room_state(principal, room) -> {status}` (server uses it for the `closed` flag).
+- Members: `mint_member(admin, room, name, role='agent') -> token`; `revoke_member(admin, room, name)`; `rotate_member(admin, room, name) -> token`.
+- Messaging: `room_post(p, room, to, thread, text) -> envelope`; `inject(admin, room, to, thread, text) -> envelope` (own persisted hourly budget,
+  default 60; same bounds; allowed while paused/closed); `room_fetch(p, room, after=0, limit=100) -> list` (empty list in a closed room is not an error).
+- Presence: `heartbeat(p, room) -> dict`; `members(p, room) -> list` (monitor/admin). Auth lookup also touches `last_seen`, throttled (write at most
+  once per 10 s per member) so reads do not become writes on every request. The server owns waiting counts and wake-ups and enriches `members` output.
+- Monitor: `monitor(p, room, after=0, limit=100) -> [{id, ts, from, to_count, bytes, source, room, thread_no}]` from a fixed allowlisted SQL projection that never
+  selects text; `thread_no` is a numeric surrogate because thread labels, task titles and branch names count as content. `stats(p, room) -> dict`.
+- Tasks: `room_task_create/finish/release/tasks` wrappers take principal+room; monitor cannot call them.
+- v1 methods and tests keep working in `default`.
 
 ## Migration strategy (v1 -> v2)
 `settings.schema_version`. On open, if missing: copy the DB file to `<db>.v1.bak`, then one transaction: create rooms/members/deliveries,
