@@ -2,6 +2,8 @@
 from contextlib import contextmanager
 import sqlite3
 import threading
+from pathlib import Path
+import time
 
 
 SCHEMA = """
@@ -33,6 +35,35 @@ CREATE TABLE IF NOT EXISTS claims (
 );
 """
 
+ROOM_SCHEMA = """
+CREATE TABLE IF NOT EXISTS rooms (
+ id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open',
+ created REAL NOT NULL, creator TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS room_members (
+ room_id TEXT NOT NULL REFERENCES rooms(id), name TEXT NOT NULL, role TEXT NOT NULL,
+ token_hash TEXT UNIQUE NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+ generation INTEGER NOT NULL DEFAULT 1, last_seen REAL,
+ PRIMARY KEY(room_id,name)
+);
+CREATE TABLE IF NOT EXISTS room_threads (
+ number INTEGER PRIMARY KEY AUTOINCREMENT, room_id TEXT NOT NULL REFERENCES rooms(id),
+ label TEXT NOT NULL, storage_key TEXT UNIQUE NOT NULL, creator TEXT NOT NULL,
+ created REAL NOT NULL, used INTEGER NOT NULL DEFAULT 0, legacy_a TEXT, legacy_b TEXT,
+ UNIQUE(room_id,label)
+);
+CREATE TABLE IF NOT EXISTS deliveries (
+ room_id TEXT NOT NULL REFERENCES rooms(id), message_id INTEGER NOT NULL REFERENCES messages(id),
+ member TEXT NOT NULL, PRIMARY KEY(room_id,message_id,member)
+);
+CREATE TABLE IF NOT EXISTS room_events (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, room_id TEXT NOT NULL REFERENCES rooms(id),
+ actor TEXT NOT NULL, action TEXT NOT NULL, subject TEXT NOT NULL, created REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS delivery_reader ON deliveries(room_id,member,message_id);
+CREATE INDEX IF NOT EXISTS room_messages ON messages(room_id,id);
+"""
+
 
 class Store:
     def __init__(self, path):
@@ -43,11 +74,58 @@ class Store:
         self.connection.execute('PRAGMA foreign_keys=ON')
         self.connection.execute('PRAGMA journal_mode=WAL')
         self.connection.execute('PRAGMA synchronous=FULL')
+        try:
+            self._initialize(path)
+        except BaseException:
+            self.connection.close()
+            raise
+
+    def _initialize(self, path):
+        tables = {r[0] for r in self.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        version = None
+        if 'settings' in tables:
+            row = self.connection.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()
+            version = int(row[0]) if row else None
+        if version is not None and version > 2:
+            raise RuntimeError('database schema is newer than this relay supports')
+        if tables and version != 2 and str(path) != ':memory:':
+            backup = Path(str(path) + '.v1.bak')
+            if not backup.exists():
+                # SQLite backup includes committed WAL pages, unlike copying the main file.
+                target = sqlite3.connect(str(backup))
+                try:
+                    self.connection.backup(target)
+                finally:
+                    target.close()
         self.connection.executescript(SCHEMA)
-        # Upgrade databases created before original claim spelling was retained.
         with self.transaction() as db:
+            current = db.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()
+            if current and int(current[0]) > 2:
+                raise RuntimeError('database schema is newer than this relay supports')
             if 'display_path' not in {r['name'] for r in db.execute('PRAGMA table_info(claims)')}:
                 db.execute('ALTER TABLE claims ADD COLUMN display_path TEXT')
+            if current and int(current[0]) == 2:
+                return
+            for table in ('threads', 'messages', 'tasks', 'claims'):
+                if 'room_id' not in {r['name'] for r in db.execute(f'PRAGMA table_info({table})')}:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN room_id TEXT NOT NULL DEFAULT 'default'")
+            for column, definition in [('source', "TEXT NOT NULL DEFAULT 'agent'"),
+                                       ('bytes', 'INTEGER NOT NULL DEFAULT 0'), ('thread_no', 'INTEGER')]:
+                if column not in {r['name'] for r in db.execute('PRAGMA table_info(messages)')}:
+                    db.execute(f'ALTER TABLE messages ADD COLUMN {column} {definition}')
+            for statement in ROOM_SCHEMA.split(';'):
+                if statement.strip():
+                    db.execute(statement)
+            db.execute("INSERT OR IGNORE INTO rooms VALUES ('default','default','open',?,'migration')", (time.time(),))
+            db.execute("INSERT OR IGNORE INTO room_members(room_id,name,role,token_hash,active) "
+                       "SELECT 'default',name,role,token_hash,active FROM agents WHERE role!='admin'")
+            db.execute("INSERT OR IGNORE INTO room_threads(room_id,label,storage_key,creator,created,used,legacy_a,legacy_b) "
+                       "SELECT 'default',id,id,creator,created,used,participant_a,participant_b FROM threads")
+            db.execute("UPDATE messages SET bytes=length(CAST(text AS BLOB)),thread_no="
+                       "(SELECT number FROM room_threads WHERE room_id='default' AND label=messages.thread)")
+            db.execute("INSERT OR IGNORE INTO deliveries SELECT 'default',id,sender FROM messages")
+            db.execute("INSERT OR IGNORE INTO deliveries SELECT 'default',id,recipient FROM messages")
+            db.execute("INSERT OR REPLACE INTO settings VALUES ('schema_version','2')")
 
     @contextmanager
     def transaction(self, *, read_only=False):
