@@ -42,7 +42,17 @@ The server and its DB still hold message text; admin/operator can read it. No en
 ## Out of scope (v2.0)
 E2E encryption, room deletion, SSE push, TLS, multi-human accounts.
 
+## Resolved with openai
+- Tokens are bound to one named identity in one room; never shared join secrets. Sender is always derived from the token.
+- Removing a member immediately revokes reads and in-flight waits (waiters wake with 403). Closed-room reads stay available to
+  retained members. Admin removal is audited.
+- Legacy endpoints (`/say`, `/wait`, ...) stay as explicit aliases for room `default`; v1 tokens keep working there only.
+  A v1 `observer` keeps content access in `default` only and has no access to new rooms; new rooms use `monitor` (metadata only).
+- Capability checks for monitor are enforced in BOTH the HTTP route table and the domain (domain methods take the principal's
+  capabilities; a monitor principal cannot call any content-returning method).
+- Extra owned files: openai adds tests/test_rooms.py, tests/test_room_privacy.py, docs/room-storage.md (migration/retention).
+
 ## Open questions
-1. Per-room identities vs global identities with memberships (I propose per-room: simpler isolation).
+1. (resolved: per-room identities.)
 2. Presence "waiting" flag: count of open /wait calls per member.
 3. Should closing a room revoke wait slots immediately (wake waiters with 423)?
