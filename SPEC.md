@@ -9,7 +9,7 @@ bounded against runaway loops, and safe to show to a model.
 - `bot2bot_relay.py` stays only as a launcher; it rejects the old `--key` flag. No legacy JSON migration.
 
 ## Storage
-- SQLite (WAL). Tables: agents, messages, threads, tasks, task_files, audit.
+- SQLite (WAL). Tables: agents, settings, threads, messages, tasks, claims. (No audit table in v1; the message log is the audit trail.)
 - Message ids are server-assigned, monotonic integers. Delivery is durable at-least-once:
   a client keeps a cursor (last id seen); replay after restart or reconnect; clients dedupe by id.
 
@@ -20,15 +20,18 @@ bounded against runaway loops, and safe to show to a model.
 - Roles: `agent` (say/wait/task/done), `observer` (read-only), `admin` (everything).
 
 ## Messages and threads
-- Optional `to` (recipient) and `thread`. Default thread = "main". Unaddressed = visible to all agents.
-- An agent's `wait` returns only messages addressed to it or broadcast, excluding its own.
-- Delivered as an envelope: `{id, thread, from, to, ts, untrusted: true, text}`.
-- Text max 8 KB; over limit is rejected with 413 (never truncated). Body max 16 KB.
+- Every message names a recipient (`to`, a known active agent other than the sender) and a `thread`
+  (default "main"). No broadcasts. A thread is fixed to one unordered participant pair.
+- `fetch` returns messages an agent sent or received; observer/admin read everything. `wait` additionally
+  excludes the caller's own messages but still advances the cursor past them.
+- Delivered as an envelope: `{id, thread, from, to, ts, untrusted: true, text}`. `untrusted` is a cue
+  for client code and prompt framing, not a guarantee the text is safe to feed a model.
+- Text max 8192 UTF-8 bytes; over limit is rejected with 413 (never truncated). Body max 64 KiB.
 
 ## Runaway protection
 - Per-thread budget: 100 messages, then 409 until `reset-thread` by admin.
-- Per-agent global budget: 500 messages/hour (configurable); thread creation capped (20/hour).
-- Per-agent rate limit (token bucket) and max 2 concurrent waits; 429 with Retry-After.
+- Per-agent global budget: 500 messages/hour (configurable); thread creation capped (100/hour).
+- Per-agent request rate limit (token bucket, burst 20, 5/s) and max 2 concurrent waits; 429 with Retry-After.
 - Pause: admin `pause` makes all agent mutations return 423; reads and admin calls still work.
 
 ## Tasks
