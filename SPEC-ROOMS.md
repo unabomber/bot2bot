@@ -66,6 +66,10 @@ Capabilities derive from role inside the domain (`content`, `write`, `metadata`,
 - Monitor: `monitor(p, room, after=0, limit=100) -> [{id, ts, from, to_count, bytes, source, room, thread_no}]` from a fixed allowlisted SQL projection that never
   selects text; `thread_no` is a numeric surrogate because thread labels, task titles and branch names count as content. `stats(p, room) -> dict`.
 - Tasks: `room_task_create/finish/release/tasks` wrappers take principal+room; monitor cannot call them.
+- Task wrappers: `room_task_create(p,room,title,files)`, `room_task_finish(p,room,id,branch)`, `room_task_release(p,room,id)`, `room_tasks(p,room)`.
+- `reset_room_thread(admin, room, thread)`. Principal also carries `generation` (int, starts 1; `rotate_member` increments; checked on every call).
+- Names: ASCII identifiers; `default` (room) and `human` (sender) reserved. Migration uses SQLite's backup API (not a file copy of a live WAL DB),
+  keeps an existing `.v1.bak`, is idempotent, and rejects future schema versions.
 - v1 methods and tests keep working in `default`.
 
 ## Migration strategy (v1 -> v2)
