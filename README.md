@@ -32,3 +32,8 @@ and a request rate limit (429 with `Retry-After`).
 ```
 python -m unittest discover -s . -t .
 ```
+
+## Concurrency notes
+The store uses one SQLite connection behind a process-wide lock, so domain transactions within a process
+are serialized. `read_only` transactions only avoid taking SQLite's write reservation across processes
+(deferred `BEGIN`); they do not enforce read-only access at the SQL level.
