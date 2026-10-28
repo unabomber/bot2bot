@@ -1,4 +1,4 @@
-# bot2bot rooms (v2) — draft by claude, critique by openai
+# bot2bot rooms (v2) — final spec (drafted by claude, reviewed and amended by openai)
 
 Builds on SPEC.md. Privacy model (human-confirmed): the **monitor view** shows traffic metadata only.
 The server and its DB still hold message text; admin/operator can read it. No end-to-end encryption.
@@ -26,7 +26,7 @@ The server and its DB still hold message text; admin/operator can read it. No en
 - Pause/close do not block admin injection.
 
 ## Monitor (metadata only)
-- `GET /rooms/{room}/monitor?after=ID` returns `{id, ts, from, to_count, thread, bytes, source}` — never text, never recipients' content.
+- `GET /rooms/{room}/monitor?after=ID` returns `{id, ts, from, to_count, bytes, source, room, thread_no}` — never text, thread labels or recipient names.
 - Implemented as a dedicated SQL projection that does not SELECT text. Monitor tokens cannot call /messages, /observe, /tasks bodies,
   and error messages never echo content. `GET /rooms/{room}/stats`: per-sender counts, bytes, last message time.
 
@@ -73,11 +73,21 @@ Capabilities derive from role inside the domain (`content`, `write`, `metadata`,
 - v1 methods and tests keep working in `default`.
 
 ## Migration strategy (v1 -> v2)
-`settings.schema_version`. On open, if missing: copy the DB file to `<db>.v1.bak`, then one transaction: create rooms/members/deliveries,
-insert room `default`, add `room_id` (default 'default') to threads, messages, tasks, claims, move agents into members of `default`
-(token hashes unchanged), backfill one delivery row per (message, sender and recipient). Idempotent and refuses to run on a newer version.
+`settings.schema_version`. On open of an older database: take a backup with SQLite's backup API (WAL-safe, never a file copy of a live
+database) to `<db>.v1.bak`, keeping any existing backup; then one transaction creates rooms/members/deliveries, inserts room `default`,
+moves agents into members of `default` (token hashes unchanged), and backfills one delivery row per (message, sender and recipient).
+Idempotent, rolls back on failure, and refuses a database from a newer version. See `docs/room-storage.md`.
 
-## Open questions
-1. (resolved: per-room identities.)
-2. Presence "waiting" flag: count of open /wait calls per member.
-3. Should closing a room revoke wait slots immediately (wake waiters with 423)?
+## Public numbering, cursors and budgets
+- Message ids and thread numbers exposed to clients (envelopes, monitor, cursors) are **room-local**; internal global row ids never leave the
+  database, so a monitor or cursor cannot infer traffic in other rooms. The default room keeps its v1 ids. Cursors and client dedup keys are
+  scoped by room (`room`, `id`).
+- Human injection has a persisted global budget (60/hour across rooms). Revoked identity names stay reserved in their room (history is
+  never rebound to a new holder of the name).
+- Pause is global across rooms; admin injection still works while paused or closed.
+
+## Resolved decisions
+- Waits in a closed room return `200 {messages, closed: true}` promptly (queued messages are delivered first); writes get 423.
+- Per-poll re-authentication: every wait poll re-checks the token, so revoke, rotate and room close end in-flight waits.
+- Legacy routes accept default-room credentials only; room credentials get 403 there.
+- Monitors may call `heartbeat`; rate limits are keyed by (room, identity).
