@@ -117,39 +117,35 @@
   async function roomsView() {
     stopTimers();
     const view = state.view;
-    const holder = el('div');
-    app.replaceChildren(holder);
     let busy = false;
+    // Forms are built once; polling only swaps table rows, so text being typed is never discarded.
+    const secrets = el('div');
+    const rows = el('tbody');
+    const nameInput = el('input', { placeholder: 'room name', pattern: '[A-Za-z0-9_-]{1,64}', required: '' });
+    const membersInput = el('input', { placeholder: 'members, comma separated' });
+    const create = el('form', { onsubmit: async (e) => {
+      e.preventDefault();
+      try {
+        const names = membersInput.value.split(',').map((s) => s.trim()).filter(Boolean);
+        const made = await api('POST', 'rooms', { name: nameInput.value, members: names });
+        nameInput.value = ''; membersInput.value = '';
+        secrets.prepend(secretPanel('Room ' + made.room + ' created',
+          made.members.map((m) => [m.name + ' (' + m.role + ')', m.token])));
+        notice('Room created');
+        refreshList();
+      } catch (err) { notice(err.message, true); }
+    } }, el('div', { class: 'row' }, nameInput, membersInput, el('button', { class: 'primary', type: 'submit' }, 'Create room')));
+    app.replaceChildren(secrets, el('section', {}, el('h2', {}, 'Rooms'),
+      scroller(el('table', {}, el('thead', {}, el('tr', {}, ...['Room', 'Status', 'Members', 'Active', 'Last activity'].map((h) => el('th', {}, h)))), rows)),
+      el('h2', {}, 'New room'), create));
+
     async function render() {
       const { rooms } = await api('GET', 'rooms');
       if (view !== state.view) return;  // user navigated away while this request was in flight
-      const body = el('tbody');
-      for (const r of rooms) {
-        body.append(el('tr', {},
-          el('td', {}, el('a', { href: '#/room/' + encodeURIComponent(r.name) }, r.name)),
-          el('td', {}, el('span', { class: 'tag' + (r.status === 'closed' ? ' closed' : '') }, r.status)),
-          el('td', {}, r.members), el('td', {}, r.active), el('td', {}, when(r.last_activity))));
-      }
-      const nameInput = el('input', { placeholder: 'room name', pattern: '[A-Za-z0-9_-]{1,64}', required: '' });
-      const membersInput = el('input', { placeholder: 'members, comma separated' });
-      const create = el('form', { onsubmit: async (e) => {
-        e.preventDefault();
-        try {
-          const names = membersInput.value.split(',').map((s) => s.trim()).filter(Boolean);
-          const made = await api('POST', 'rooms', { name: nameInput.value, members: names });
-          nameInput.value = ''; membersInput.value = '';
-          holder.prepend(secretPanel('Room ' + made.room + ' created',
-            made.members.map((m) => [m.name + ' (' + m.role + ')', m.token])));
-          notice('Room created');
-          refreshList();
-        } catch (err) { notice(err.message, true); }
-      } }, el('div', { class: 'row' }, nameInput, membersInput, el('button', { class: 'primary', type: 'submit' }, 'Create room')));
-      const list = el('section', {}, el('h2', {}, 'Rooms'),
-        scroller(el('table', {}, el('thead', {}, el('tr', {}, ...['Room', 'Status', 'Members', 'Active', 'Last activity'].map((h) => el('th', {}, h)))), body)),
-        el('h2', {}, 'New room'), create);
-      holder.querySelector('#roomlist')?.remove();
-      list.id = 'roomlist';
-      holder.append(list);
+      rows.replaceChildren(...rooms.map((r) => el('tr', {},
+        el('td', {}, el('a', { href: '#/room/' + encodeURIComponent(r.name) }, r.name)),
+        el('td', {}, el('span', { class: 'tag' + (r.status === 'closed' ? ' closed' : '') }, r.status)),
+        el('td', {}, r.members), el('td', {}, r.active), el('td', {}, when(r.last_activity)))));
     }
     const refreshList = async () => {
       if (busy) return;  // never overlap list polls
@@ -164,54 +160,61 @@
     stopTimers();
     const view = state.view;
     let after = 0;                       // feed cursor is local to this view
+    let closed = false;
     const busy = { members: false, feed: false };
-    const head = el('section');
-    const membersBox = el('section');
+    const q = encodeURIComponent(room);
+    // Static controls are built once; polls update only table rows and labels, never the forms.
+    const title = el('h2', {}, room + ' ');
+    const status = el('span', { class: 'tag' }, 'open');
+    title.append(status);
+    const toggle = el('button', { type: 'button', onclick: () => act(closed ? 'reopen' : 'close', {}) }, 'Close room');
+    const threadNo = el('input', { type: 'number', min: '1', step: '1', placeholder: 'thread #' });
+    const head = el('section', {}, title, el('div', { class: 'row' }, toggle,
+      threadNo, el('button', { type: 'button', onclick: () => {
+        const n = Number(threadNo.value);
+        if (!Number.isInteger(n) || n < 1) return notice('Enter the thread number shown in the traffic table', true);
+        act('reset-thread', { thread: n });
+      } }, 'Reset thread budget')));
+    const membersBody = el('tbody');
+    const addName = el('input', { placeholder: 'new member', pattern: '[A-Za-z0-9_-]{1,64}' });
+    const addRole = el('select', {}, el('option', { value: 'agent' }, 'agent'), el('option', { value: 'monitor' }, 'monitor'));
+    const secrets = el('div');
+    const membersBox = el('section', {}, el('h2', {}, 'Members'),
+      scroller(el('table', {}, el('thead', {}, el('tr', {}, ...['Name', 'Role', 'State', 'Last seen', '', ''].map((h) => el('th', {}, h)))), membersBody)),
+      el('div', { class: 'row' }, addName, addRole, el('button', { type: 'button', onclick: async () => {
+        if (!addName.value) return;
+        try {
+          const made = await api('POST', `rooms/${q}/members`, { name: addName.value, role: addRole.value });
+          addName.value = '';
+          secrets.prepend(secretPanel('Member added', [[made.name, made.token]]));
+          pollMembers();
+        } catch (err) { notice(err.message, true); }
+      } }, 'Add member')));
     const feedBody = el('tbody');
     const stats = el('p', { class: 'muted' });
     const feed = el('section', {}, el('h2', {}, 'Traffic (metadata only)'), stats,
       el('div', { class: 'feed scroll' }, el('table', {}, el('thead', {}, el('tr', {},
-        ...['#', 'Time', 'From', 'To', 'Bytes', 'Source'].map((h) => el('th', {}, h)))), feedBody)));
-    const secrets = el('div');
-    const inject = injectForm(room);
-    app.replaceChildren(el('p', {}, el('a', { href: '#/rooms' }, '← Rooms')), head, secrets, membersBox, feed, inject);
+        ...['#', 'Time', 'From', 'To', 'Bytes', 'Source', 'Thread'].map((h) => el('th', {}, h)))), feedBody)));
+    app.replaceChildren(el('p', {}, el('a', { href: '#/rooms' }, '\u2190 Rooms')), head, secrets, membersBox, feed, injectForm(room));
 
     async function refreshMembers() {
-      const [{ members }, { rooms }] = await Promise.all([api('GET', `rooms/${encodeURIComponent(room)}/members`), api('GET', 'rooms')]);
+      const [{ members }, { rooms }] = await Promise.all([api('GET', `rooms/${q}/members`), api('GET', 'rooms')]);
       if (view !== state.view) return;
       const info = rooms.find((r) => r.name === room);
-      const closed = info && info.status === 'closed';
-      head.replaceChildren(el('h2', {}, room + ' ', el('span', { class: 'tag' + (closed ? ' closed' : '') }, closed ? 'closed' : 'open')),
-        el('div', { class: 'row' },
-          el('button', { type: 'button', onclick: () => act(closed ? 'reopen' : 'close', {}) }, closed ? 'Reopen room' : 'Close room'),
-          el('button', { type: 'button', onclick: () => {
-            const t = prompt('Thread name to reset'); if (t) act('reset-thread', { thread: t });
-          } }, 'Reset thread budget')));
-      const body = el('tbody');
-      for (const m of members) {
-        body.append(el('tr', {},
-          el('td', {}, el('span', { class: 'dot' + (m.active ? ' on' : '') }), m.name),
-          el('td', {}, m.role), el('td', {}, m.active ? 'active' : 'idle'), el('td', {}, when(m.last_seen)),
-          el('td', {}, m.waiting ? 'waiting' : ''),
-          el('td', {}, el('button', { type: 'button', onclick: () => rotate(m.name) }, 'Rotate'), ' ',
-            el('button', { class: 'danger', type: 'button', onclick: () => revoke(m.name) }, 'Revoke'))));
-      }
-      const addName = el('input', { placeholder: 'new member', pattern: '[A-Za-z0-9_-]{1,64}' });
-      const addRole = el('select', {}, el('option', { value: 'agent' }, 'agent'), el('option', { value: 'monitor' }, 'monitor'));
-      membersBox.replaceChildren(el('h2', {}, 'Members'),
-        scroller(el('table', {}, el('thead', {}, el('tr', {}, ...['Name', 'Role', 'State', 'Last seen', '', ''].map((h) => el('th', {}, h)))), body)),
-        el('div', { class: 'row' }, addName, addRole, el('button', { type: 'button', onclick: async () => {
-          if (!addName.value) return;
-          try {
-            const made = await api('POST', `rooms/${encodeURIComponent(room)}/members`, { name: addName.value, role: addRole.value });
-            secrets.prepend(secretPanel('Member added', [[made.name, made.token]]));
-            pollMembers();
-          } catch (err) { notice(err.message, true); }
-        } }, 'Add member')));
+      closed = !!info && info.status === 'closed';
+      status.textContent = closed ? 'closed' : 'open';
+      status.className = 'tag' + (closed ? ' closed' : '');
+      toggle.textContent = closed ? 'Reopen room' : 'Close room';
+      membersBody.replaceChildren(...members.map((m) => el('tr', {},
+        el('td', {}, el('span', { class: 'dot' + (m.active ? ' on' : '') }), m.name),
+        el('td', {}, m.role), el('td', {}, m.active ? 'active' : 'idle'), el('td', {}, when(m.last_seen)),
+        el('td', {}, m.waiting ? 'waiting' : ''),
+        el('td', {}, el('button', { type: 'button', onclick: () => rotate(m.name) }, 'Rotate'), ' ',
+          el('button', { class: 'danger', type: 'button', onclick: () => revoke(m.name) }, 'Revoke')))));
     }
 
     async function act(action, body) {
-      try { await api('POST', `rooms/${encodeURIComponent(room)}/${action}`, body); notice('Done'); pollMembers(); }
+      try { await api('POST', `rooms/${q}/${action}`, body); notice('Done'); pollMembers(); }
       catch (err) { notice(err.message, true); }
     }
     async function revoke(name) {
@@ -232,7 +235,7 @@
       if (view !== state.view) return;  // stale response from a room we already left: ignore it, keep our cursor
       for (const e of res.events) {
         feedBody.append(el('tr', {}, el('td', {}, e.id), el('td', {}, when(e.ts)), el('td', {}, e.from),
-          el('td', {}, e.to_count + ' recipient(s)'), el('td', {}, e.bytes), el('td', {}, e.source)));
+          el('td', {}, e.to_count + ' recipient(s)'), el('td', {}, e.bytes), el('td', {}, e.source), el('td', {}, e.thread_no)));
       }
       after = res.cursor;
       while (feedBody.rows.length > 500) feedBody.deleteRow(0);

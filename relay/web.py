@@ -142,7 +142,10 @@ class _Request:
         self.reply_json(200, self.domain.set_room_closed(self.admin, room, False))
 
     def api_reset_thread(self, q, body, room):
-        self.domain.reset_room_thread(self.admin, room, body.get('thread'))
+        thread = body.get('thread')
+        if type(thread) is not int or thread < 1:
+            raise DomainError(400, 'thread must be the public thread number (integer)')  # labels are content; never accepted here
+        self.domain.reset_room_thread(self.admin, room, thread)
         self.reply_json(200, {'ok': True})
 
     def api_inject(self, q, body, room):

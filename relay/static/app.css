@@ -29,6 +29,7 @@ code, .mono { font-family:ui-monospace, Menlo, Consolas, monospace; font-size:13
 #notice { position:fixed; bottom:16px; left:50%; transform:translateX(-50%); background:var(--card); border:1px solid var(--line); border-radius:8px; padding:8px 14px; max-width:90vw; }
 #notice.error { border-color:var(--bad); color:var(--bad); }
 .feed { max-height:320px; overflow:auto; }
+a { color: var(--accent); }
 [hidden] { display:none !important; }
 .scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; }
 .scroll table { min-width:520px; }

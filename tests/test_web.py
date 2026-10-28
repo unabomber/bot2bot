@@ -98,6 +98,11 @@ class WebTests(unittest.TestCase):
         self.assertNotIn('nth-child', css)                  # no hidden table columns on narrow screens
         self.assertIn('overflow-x:auto', css)
         self.assertIn('window.isSecureContext', js)          # clipboard fallback for plain-HTTP pages
+        self.assertIn('rows.replaceChildren', js)            # polling swaps table rows only; forms keep what is typed
+        self.assertIn('membersBody.replaceChildren', js)
+        self.assertIn("type: 'number'", js)                 # thread reset takes the public thread number, never a label
+        self.assertIn('e.thread_no', js)
+        self.assertIn('a { color: var(--accent); }', css)
 
     def test_static_allowlist_and_traversal(self):
         for path in ('/ui/../relay/server.py', '/ui/%2e%2e/relay/server.py', '/ui/static/app.js', '/ui/index.html',
@@ -211,7 +216,10 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.api('POST', 'rooms/alpha/members/b/revoke', s)[0], 200)
         members = self.api('GET', 'rooms/alpha/members', s)[1]['members']
         self.assertEqual({m['name'] for m in members}, {'a', 'eye'})
-        self.assertEqual(self.api('POST', 'rooms/alpha/reset-thread', s, {'thread': 'nothing'})[0], 404)
+        self.assertEqual(self.api('POST', 'rooms/alpha/reset-thread', s, {'thread': 'nothing'})[0], 400)   # labels are content: numbers only
+        self.assertEqual(self.api('POST', 'rooms/alpha/reset-thread', s, {'thread': True})[0], 400)
+        self.assertEqual(self.api('POST', 'rooms/alpha/reset-thread', s, {'thread': 0})[0], 400)
+        self.assertIn(self.api('POST', 'rooms/alpha/reset-thread', s, {'thread': 999})[0], (404, 400))
         self.assertEqual(self.api('POST', 'rooms', s, {'name': 'bad name'})[0], 400)
         self.assertEqual(self.api('POST', 'rooms/alpha/inject', s, {'to': 5, 'text': 'x'})[0], 400)
 
