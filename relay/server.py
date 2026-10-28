@@ -17,6 +17,14 @@ SOCKET_TIMEOUT = 30
 BUCKET_BURST, BUCKET_RATE = 20, 5.0
 
 
+class Busy(DomainError):
+    """429 with a retry hint in seconds."""
+
+    def __init__(self, message, retry_after):
+        super().__init__(429, message)
+        self.retry_after = retry_after
+
+
 class Hub:
     """Shared state for handlers: domain, long-poll wake-ups, wait slots, rate buckets."""
 
@@ -42,7 +50,7 @@ class Hub:
         name, end = principal['name'], time.monotonic() + timeout
         with self.cv:
             if self.waits.get(name, 0) >= MAX_WAITS_PER_AGENT:
-                raise DomainError(429, 'too many concurrent waits')
+                raise Busy('too many concurrent waits', 5)
             self.waits[name] = self.waits.get(name, 0) + 1
         try:
             while True:
@@ -186,7 +194,8 @@ def make_handler(hub):
                 finally:
                     self.drain()
             except DomainError as err:
-                self.fail(err.code, err.message)
+                retry = getattr(err, 'retry_after', 60 if err.code == 429 else None)
+                self.fail(err.code, err.message, [('retry-after', str(retry))] if retry else ())
             except (BrokenPipeError, ConnectionResetError, TimeoutError):
                 self.close_connection = True
             except Exception:

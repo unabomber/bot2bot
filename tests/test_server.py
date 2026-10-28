@@ -162,6 +162,40 @@ class ServerTests(unittest.TestCase):
         from relay import server
         self.assertEqual(server.SOCKET_TIMEOUT, 30)
 
+    def test_wait_slots_and_budget_retry_after(self):
+        results = []
+        threads = [threading.Thread(target=lambda: results.append(self.call('GET', '/wait?timeout=3', 'b')))
+                   for _ in range(2)]
+        for t in threads:
+            t.start()
+        time.sleep(0.5)
+        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
+        conn.request('GET', '/wait?timeout=1', headers={'Authorization': f"Bearer {self.tokens['b']}"})
+        resp = conn.getresponse()
+        resp.read()
+        self.assertEqual((resp.status, resp.getheader('retry-after')), (429, '5'))
+        for t in threads:
+            t.join(10)
+        self.assertEqual(sorted(r[0] for r in results), [200, 200])
+        self.say('a', 'b', thread='u')
+        self.domain.hourly_messages = 1
+        conn.request('POST', '/say', body=json.dumps({'to': 'b', 'thread': 'u', 'text': 'x'}),
+                     headers={'Authorization': f"Bearer {self.tokens['a']}"})
+        resp = conn.getresponse()
+        resp.read()
+        self.assertEqual((resp.status, resp.getheader('retry-after')), (429, '60'))
+
+    def test_revocation_during_wait(self):
+        result = {}
+        t = threading.Thread(target=lambda: result.update(r=self.call('GET', '/wait?timeout=30', 'b')))
+        t.start()
+        time.sleep(0.5)
+        self.domain.revoke('b')
+        t.join(8)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(result['r'][0], 403)
+        self.assertEqual(self.call('GET', '/status', 'b')[0], 401)
+
     def test_roles_enforced_per_route(self):
         self.assertEqual(self.call('GET', '/wait?timeout=0', 'eye')[0], 403)
         self.assertEqual(self.call('GET', '/wait?timeout=0', 'root')[0], 403)
