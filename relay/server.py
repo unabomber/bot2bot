@@ -279,13 +279,15 @@ def make_handler(hub):
             return _recipients(body.get('to')), body.get('thread', 'main'), body['text']
 
         # ---- legacy routes (room 'default'); legacy waits re-authenticate their bearer token each poll ----
+        def reauth(self):
+            """Re-run bearer lookup: default-room principals carry no generation to detect revocation."""
+            principal = domain.lookup(self.token_hash)
+            if principal is None:
+                raise DomainError(403, 'credentials revoked')
+            return principal
+
         def do_legacy_wait(self, who, q, body):
-            def fetch(after):
-                principal = domain.lookup(self.token_hash)
-                if principal is None:
-                    raise DomainError(403, 'credentials revoked')
-                return domain.fetch(principal, after, 100)
-            self.wait_reply(who, q, DEFAULT_ROOM, fetch)
+            self.wait_reply(who, q, DEFAULT_ROOM, lambda after: domain.fetch(self.reauth(), after, 100))
 
         def do_legacy_messages(self, who, q, body):
             rows = domain.fetch(who, _int(q, 'after', 0), _int(q, 'limit', 100, 1, 1000))
@@ -339,7 +341,11 @@ def make_handler(hub):
             self.reply(200, {'id': env['id']})
 
         def do_room_wait(self, who, q, body, room):
-            self.wait_reply(who, q, room, lambda after: domain.room_fetch(who, room, after, 100))
+            def fetch(after):
+                # principals without a generation (default room) must re-authenticate on every poll
+                principal = who if 'generation' in who else self.reauth()
+                return domain.room_fetch(principal, room, after, 100)
+            self.wait_reply(who, q, room, fetch)
 
         def do_room_messages(self, who, q, body, room):
             after = _int(q, 'after', 0)

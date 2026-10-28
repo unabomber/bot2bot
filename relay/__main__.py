@@ -19,6 +19,10 @@ def _admin(store):
     return {'name': row['name'], 'role': 'admin', 'room': None, 'generation': 1}
 
 
+def _when(ts):
+    return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts)) if isinstance(ts, (int, float)) else '-'
+
+
 def _recipients(text):
     return '*' if text == '*' else [n for n in text.split(',') if n]
 
@@ -75,7 +79,7 @@ def build_parser():
 def _members_table(domain, admin, name):
     for m in domain.members(admin, name):
         mark = 'active' if m.get('active') else 'idle'
-        print(f"{m['name']:<20} {m['role']:<8} {mark:<7} last_seen={m.get('last_seen')}")
+        print(f"{m['name']:<20} {m['role']:<8} {mark:<7} last_seen={_when(m.get('last_seen'))}")
 
 
 def _watch(domain, admin, room, interval):
@@ -132,7 +136,7 @@ def run(args, store, domain):
         elif sub == 'list':
             for r in domain.list_rooms(admin):
                 print(f"{r['name']:<20} {r['status']:<7} members={r.get('members')} active={r.get('active')} "
-                      f"last_activity={r.get('last_activity')}")
+                      f"last_activity={_when(r.get('last_activity'))}")
         elif sub in ('close', 'reopen'):
             domain.set_room_closed(admin, args.name, sub == 'close')
         elif sub == 'members':
