@@ -115,6 +115,24 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.call('POST', '/done', 'b', {'id': task['id'], 'branch': 'b/x'})[0], 403)
         self.assertEqual(self.call('POST', '/done', 'a', {'id': task['id'], 'branch': 'a/x'})[0], 200)
 
+    def test_admin_route_aliases_not_reachable(self):
+        for who in ('a', 'eye'):
+            for path in ('/admin/pause', '/admin_pause', '/admin-pause', '/admin/resume', '/admin_resume',
+                         '/admin-resume', '/admin/reset-thread', '/admin_reset_thread', '/admin/reset_thread',
+                         '/admin//pause', '/admin/pause/', '/ADMIN/pause'):
+                status, _ = self.call('POST', path, who, {'thread': 't'})
+                self.assertIn(status, (403, 404), (who, path))
+        self.assertFalse(self.domain.is_paused())
+        for path in ('/admin_pause', '/admin-pause', '/admin//pause', '/admin/pause/'):
+            self.assertEqual(self.call('POST', path, 'root')[0], 404, path)
+        self.assertEqual(self.call('GET', '/admin/pause', 'root')[0], 404)
+        self.assertFalse(self.domain.is_paused())
+
+    def test_roles_enforced_per_route(self):
+        self.assertEqual(self.call('GET', '/wait?timeout=0', 'eye')[0], 403)
+        self.assertEqual(self.call('GET', '/wait?timeout=0', 'root')[0], 403)
+        self.assertEqual(self.call('POST', '/task', 'eye', {'title': 'x', 'files': ['f']})[0], 403)
+
     def test_observer_cannot_write(self):
         self.assertEqual(self.say('eye', 'a')[0], 403)
 

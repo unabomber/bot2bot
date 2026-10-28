@@ -64,6 +64,28 @@ class Hub:
             self.cv.notify_all()
 
 
+ANY = frozenset({'agent', 'observer', 'admin'})
+AGENT = frozenset({'agent'})
+WATCH = frozenset({'observer', 'admin'})
+ADMIN = frozenset({'admin'})
+
+# Exact (method, path) -> (handler name, allowed roles). Authorization lives only here.
+ROUTES = {
+    ('GET', '/wait'): ('get_wait', AGENT),
+    ('GET', '/messages'): ('get_messages', ANY),
+    ('GET', '/tasks'): ('get_tasks', ANY),
+    ('GET', '/status'): ('get_status', ANY),
+    ('GET', '/observe'): ('get_observe', WATCH),
+    ('POST', '/say'): ('post_say', AGENT),
+    ('POST', '/task'): ('post_task', AGENT),
+    ('POST', '/done'): ('post_done', AGENT),
+    ('POST', '/release'): ('post_release', AGENT),
+    ('POST', '/admin/pause'): ('post_admin_pause', ADMIN),
+    ('POST', '/admin/resume'): ('post_admin_resume', ADMIN),
+    ('POST', '/admin/reset-thread'): ('post_admin_reset_thread', ADMIN),
+}
+
+
 def _int(q, key, default, lo=0, hi=2**63 - 1):
     raw = q.get(key, [str(default)])[0]
     if not raw.isdigit() or not lo <= int(raw) <= hi:
@@ -84,6 +106,7 @@ def make_handler(hub):
             self.send_header('content-type', ctype)
             self.send_header('content-length', str(len(data)))
             self.send_header('cache-control', 'no-store')
+            self.send_header('x-content-type-options', 'nosniff')
             for key, value in headers:
                 self.send_header(key, value)
             self.end_headers()
@@ -118,12 +141,13 @@ def make_handler(hub):
             delay = hub.take(who['name'])
             if delay:
                 return self.fail(429, 'rate limit exceeded', [('retry-after', str(int(delay) + 1))])
-            route = getattr(self, f'{method}_{url.path.strip("/").replace("/", "_").replace("-", "_")}', None)
-            if route is None:
+            entry = ROUTES.get((method.upper(), url.path))
+            if entry is None:
                 return self.fail(404, 'not found')
-            role = who['role']
-            if url.path.startswith('/admin/') and role != 'admin':
-                return self.fail(403, 'admin role required')
+            handler, roles = entry
+            if who['role'] not in roles:
+                return self.fail(403, f"{' or '.join(sorted(roles))} role required")
+            route = getattr(self, handler)
             body = self.body() if method == 'post' else {}
             if 'from' in body and body['from'] != who['name']:
                 return self.fail(400, 'from does not match authenticated identity')
@@ -162,8 +186,6 @@ def make_handler(hub):
             self.reply(200, domain.status())
 
         def get_observe(self, who, q, _body):
-            if who['role'] == 'agent':
-                raise DomainError(403, 'observer or admin role required')
             rows = domain.fetch(who, 0, 1000)
             text = '\n\n'.join(f"[{m['id']}] {m['from']} -> {m['to']} ({m['thread']}): {m['text']}" for m in rows)
             self.reply(200, text, ctype='text/plain; charset=utf-8')
