@@ -341,7 +341,7 @@ class WebTests(unittest.TestCase):
                  self.request('POST', '/ui/login', {'token': 'x' * 43}),
                  self.request('POST', '/ui/login', raw='not json'),
                  self.request('GET', '/ui/api/rooms'),
-                 self.request('POST', '/ui/login', {'token': 'x'}, headers={'Content-Length': '-1'})]
+                 self.request('POST', '/ui/login', raw='', headers={'Content-Length': '-1'})]  # header-only rejection: no body to leave unread
         s = self.session()
         cases.append(self.request('POST', '/ui/api/rooms', {'name': 'q'}, cookie=s[0], csrf='wrong'))
         for status, _, resp in cases:

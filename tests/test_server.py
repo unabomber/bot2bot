@@ -230,5 +230,27 @@ class ServerTests(unittest.TestCase):
         self.assertEqual([m['text'] for m in rows], ['persist'])
 
 
+    def test_discard_after_framing_error_has_absolute_deadline(self):
+        class Drip:
+            def __init__(self):
+                self.timeouts = []
+
+            def settimeout(self, value):
+                self.timeouts.append(value)
+
+            def recv(self, size):
+                time.sleep(min(self.timeouts[-1], 0.1))   # one byte per 0.1 s, forever
+                return b'x'
+        handler_cls = self.server.RequestHandlerClass
+        handler = handler_cls.__new__(handler_cls)
+        handler.connection = Drip()
+        start = time.monotonic()
+        handler.discard_pending()
+        self.assertLess(time.monotonic() - start, 1.0)
+        self.assertTrue(handler.close_connection)
+        self.assertTrue(all(t <= 0.25 for t in handler.connection.timeouts))
+        self.assertLess(handler.connection.timeouts[-1], handler.connection.timeouts[0])   # timeout shrinks with the deadline
+
+
 if __name__ == '__main__':
     unittest.main()
