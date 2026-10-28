@@ -161,7 +161,7 @@
     const view = state.view;
     let after = 0;                       // feed cursor is local to this view
     let closed = false;
-    const busy = { members: false, feed: false };
+    const busy = { members: false, feed: false, sync: false };
     const q = encodeURIComponent(room);
     // Static controls are built once; polls update only table rows and labels, never the forms.
     const title = el('h2', {}, room + ' ');
@@ -195,7 +195,41 @@
     const feed = el('section', {}, el('h2', {}, 'Traffic (metadata only)'), stats,
       el('div', { class: 'feed scroll' }, el('table', {}, el('thead', {}, el('tr', {},
         ...['#', 'Time', 'From', 'To', 'Bytes', 'Source', 'Thread'].map((h) => el('th', {}, h)))), feedBody)));
-    app.replaceChildren(el('p', {}, el('a', { href: '#/rooms' }, '\u2190 Rooms')), head, secrets, membersBox, feed, injectForm(room));
+    // ---- agreement / stall panel: versions, names and numbers only (never state text or reasons) ----
+    const syncLine = el('p', { class: 'muted' });
+    const roundLine = el('p', { class: 'muted' });
+    const syncBody = el('tbody');
+    const strictBox = el('input', { type: 'checkbox' });
+    const autoBox = el('input', { type: 'checkbox' });
+    const stallInput = el('input', { type: 'number', min: '5', max: '86400', step: '1', placeholder: 'stall seconds' });
+    const turnSelect = el('select', {}, el('option', { value: '' }, '(no turn holder)'));
+    const removeSelect = el('select', {});
+    const resetInput = el('input', { type: 'number', min: '1', step: '1', placeholder: 'version' });
+    let settingsLoaded = false;
+    const postSync = async (action, body, done) => {
+      try { await api('POST', `rooms/${q}/sync/${action}`, body); notice(done); settingsLoaded = false; pollSync(); }
+      catch (err) { notice(err.message, true); }
+    };
+    const syncBox = el('section', {}, el('h2', {}, 'Agreement and stalls'), syncLine, roundLine,
+      scroller(el('table', {}, el('thead', {}, el('tr', {}, ...['Member', 'Agreed version', 'In sync', 'Waiting on'].map((h) => el('th', {}, h)))), syncBody)),
+      el('div', { class: 'row' }, el('button', { type: 'button', onclick: () => postSync('abort', {}, 'Round aborted') }, 'Abort open round'),
+        removeSelect, el('button', { class: 'danger', type: 'button', onclick: () => {
+          if (removeSelect.value && confirm('Remove ' + removeSelect.value + ' from the round? Everyone remaining must acknowledge again.'))
+            postSync('remove', { name: removeSelect.value }, 'Participant removed');
+        } }, 'Remove participant'),
+        resetInput, el('button', { type: 'button', onclick: () => {
+          const v = Number(resetInput.value);
+          if (!Number.isInteger(v) || v < 1) return notice('Enter a committed version number', true);
+          postSync('reset', { version: v }, 'Reset proposed; members must acknowledge');
+        } }, 'Propose reset to version')),
+      el('div', { class: 'row' }, el('label', {}, strictBox, ' Strict: messages must carry the current version'),
+        el('label', {}, autoBox, ' Auto-pass turn when stalled'), stallInput, turnSelect,
+        el('button', { class: 'primary', type: 'button', onclick: () => {
+          const secs = Number(stallInput.value);
+          if (!Number.isInteger(secs) || secs < 5 || secs > 86400) return notice('Stall seconds must be 5 to 86400', true);
+          postSync('settings', { strict: strictBox.checked, auto_pass: autoBox.checked, stall_seconds: secs, turn: turnSelect.value || null }, 'Settings saved');
+        } }, 'Save settings')));
+    app.replaceChildren(el('p', {}, el('a', { href: '#/rooms' }, '\u2190 Rooms')), head, secrets, membersBox, syncBox, feed, injectForm(room));
 
     async function refreshMembers() {
       const [{ members }, { rooms }] = await Promise.all([api('GET', `rooms/${q}/members`), api('GET', 'rooms')]);
@@ -230,6 +264,28 @@
         pollMembers();
       } catch (err) { notice(err.message, true); }
     }
+    async function refreshSync() {
+      const s = await api('GET', `rooms/${q}/sync`);
+      if (view !== state.view) return;
+      const names = Object.keys(s.acks || {}).sort();
+      syncLine.textContent = `Committed version ${s.version}. ` + (s.stalled ? `STALLED (${s.kind}) since ${when(s.since)}: ${(s.members || []).join(', ')}.` : 'Not stalled.')
+        + (s.turn ? ` Turn: ${s.turn}.` : '');
+      roundLine.textContent = s.round_open && s.round
+        ? `Round v${s.round.version} open: acknowledged ${s.round.acked.length} of ${s.round.enrolled.length}`
+          + (s.unacked.length ? `, waiting for ${s.unacked.join(', ')}` : '') + `, deadline ${when(s.round.deadline)}.`
+        : 'No round open.';
+      syncBody.replaceChildren(...names.map((n) => el('tr', {}, el('td', {}, n), el('td', {}, s.acks[n] === null ? '-' : s.acks[n]),
+        el('td', {}, (s.drift || []).includes(n) ? 'DRIFT' : 'yes'), el('td', {}, (s.waiting_on && s.waiting_on[n]) || ''))));
+      const keep = removeSelect.value;
+      removeSelect.replaceChildren(el('option', { value: '' }, 'Remove participant...'), ...names.map((n) => el('option', { value: n }, n)));
+      removeSelect.value = names.includes(keep) ? keep : '';
+      const turn = turnSelect.value;
+      turnSelect.replaceChildren(el('option', { value: '' }, '(no turn holder)'), ...names.map((n) => el('option', { value: n }, n)));
+      if (!settingsLoaded) {          // fill the form once, so polling never overwrites what is being edited
+        strictBox.checked = !!s.strict; autoBox.checked = !!s.auto_pass; stallInput.value = s.stall_seconds; turnSelect.value = s.turn || '';
+        settingsLoaded = true;
+      } else { turnSelect.value = names.includes(turn) ? turn : ''; }
+    }
     async function refreshFeed() {
       const res = await api('GET', `rooms/${encodeURIComponent(room)}/monitor?after=${after}&limit=200`);
       if (view !== state.view) return;  // stale response from a room we already left: ignore it, keep our cursor
@@ -249,9 +305,9 @@
       busy[key] = true;
       try { await fn(); } catch (e) { if (e.message !== 'signed out') notice(e.message, true); } finally { busy[key] = false; }
     };
-    const pollFeed = safe('feed', refreshFeed), pollMembers = safe('members', refreshMembers);
-    pollMembers(); pollFeed();
-    state.timers.push(setInterval(pollFeed, 2000), setInterval(pollMembers, 5000));
+    const pollFeed = safe('feed', refreshFeed), pollMembers = safe('members', refreshMembers), pollSync = safe('sync', refreshSync);
+    pollMembers(); pollFeed(); pollSync();
+    state.timers.push(setInterval(pollFeed, 2000), setInterval(pollMembers, 5000), setInterval(pollSync, 5000));
   }
 
   function injectForm(room) {

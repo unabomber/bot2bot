@@ -255,6 +255,41 @@ class WebTests(unittest.TestCase):
         number = self.api('GET', 'rooms/alpha/monitor', s)[1]['events'][0]['thread_no']
         self.assertEqual(self.api('POST', 'rooms/alpha/reset-thread', s, {'thread_no': number})[0], 200)
 
+    def test_sync_panel_api_is_metadata_only_and_admin_controls_work(self):
+        s = self.session()
+        made = self.api('POST', 'rooms', s, {'name': 'alpha', 'members': ['a', 'b', 'c']})[1]
+        tokens = {m['name']: m['token'] for m in made['members']}
+
+        def agent(who, method, path, body=None):
+            conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
+            conn.request(method, path, body=json.dumps(body) if body is not None else None,
+                         headers={'Authorization': f'Bearer {tokens[who]}'})
+            resp = conn.getresponse()
+            return resp.status, json.loads(resp.read().decode())
+        status, proposed = agent('a', 'POST', '/rooms/alpha/state/propose', {'base_version': 0, 'state': 'PRIVATE-STATE-TEXT'})
+        self.assertEqual(status, 200)
+        self.assertEqual(agent('a', 'POST', '/rooms/alpha/status', {'state_version': 0, 'waiting_on': 'b', 'reason': 'PRIVATE-REASON-TEXT'})[0], 200)
+        status, view = self.api('GET', 'rooms/alpha/sync', s)
+        self.assertEqual(status, 200)
+        self.assertTrue(view['round_open'])
+        self.assertEqual(view['waiting_on']['a'], 'b')
+        blob = json.dumps(view)
+        self.assertNotIn('PRIVATE-STATE-TEXT', blob)
+        self.assertNotIn('PRIVATE-REASON-TEXT', blob)
+        self.assertEqual(self.api('POST', 'rooms/alpha/sync/abort', s)[0], 200)
+        self.assertFalse(self.api('GET', 'rooms/alpha/sync', s)[1]['round_open'])
+        status, cfg = self.api('POST', 'rooms/alpha/sync/settings', s, {'strict': True, 'stall_seconds': 30, 'turn': 'a'})
+        self.assertEqual((status, cfg['strict'], cfg['turn']), (200, True, 'a'))
+        self.assertEqual(self.api('POST', 'rooms/alpha/sync/settings', s, {'bogus': 1})[0], 400)
+        self.assertEqual(self.api('POST', 'rooms/alpha/sync/settings', s, {'turn': None})[1]['turn'], None)
+        agent('a', 'POST', '/rooms/alpha/state/propose', {'base_version': 0, 'state': 'x'})
+        self.assertEqual(self.api('POST', 'rooms/alpha/sync/remove', s, {'name': 'c'})[0], 200)
+        # CSRF still guards the new mutations, and nothing here is reachable with a bearer or without a session
+        cookie, csrf = s
+        self.assertEqual(self.request('POST', '/ui/api/rooms/alpha/sync/abort', {}, cookie=cookie, csrf='wrong')[0], 403)
+        self.assertEqual(self.request('GET', '/ui/api/rooms/alpha/sync')[0], 401)
+        self.assertEqual(self.api('GET', 'rooms/alpha/state', s)[0], 404)          # shared state text has no UI route
+
     def test_logout_and_logout_all(self):
         one, two = self.session(), self.session()
         self.assertEqual(self.api('POST', 'logout', one)[0], 200)

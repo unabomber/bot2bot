@@ -36,6 +36,11 @@ API = [(m, re.compile('/ui/api/' + p), h) for m, p, h in [
     ('GET', rf'rooms/{ROOM}/members', 'members'),
     ('GET', rf'rooms/{ROOM}/monitor', 'monitor'),
     ('GET', rf'rooms/{ROOM}/stats', 'stats'),
+    ('GET', rf'rooms/{ROOM}/sync', 'sync'),
+    ('POST', rf'rooms/{ROOM}/sync/abort', 'sync_abort'),
+    ('POST', rf'rooms/{ROOM}/sync/remove', 'sync_remove'),
+    ('POST', rf'rooms/{ROOM}/sync/reset', 'sync_reset'),
+    ('POST', rf'rooms/{ROOM}/sync/settings', 'sync_settings'),
 ]]
 
 
@@ -183,3 +188,26 @@ class _Request:
 
     def api_stats(self, q, body, room):
         self.reply_json(200, self.domain.stats(self.admin, room))
+
+    # ---- room sync (metadata only: versions, names, ack numbers, stall kind; never state text or reasons) ----
+    def api_sync(self, q, body, room):
+        self.reply_json(200, self.domain.sync_monitor(self.admin, room))
+
+    def api_sync_abort(self, q, body, room):
+        self.reply_json(200, self.domain.sync_abort(self.admin, room))
+        self.hub.wake()
+
+    def api_sync_remove(self, q, body, room):
+        self.reply_json(200, self.domain.sync_remove(self.admin, room, body.get('name')))
+        self.hub.wake()
+
+    def api_sync_reset(self, q, body, room):
+        self.reply_json(200, self.domain.sync_reset(self.admin, room, body.get('version')))
+        self.hub.wake()
+
+    def api_sync_settings(self, q, body, room):
+        allowed = {'strict', 'auto_pass', 'stall_seconds', 'turn'}
+        if set(body) - allowed:
+            raise DomainError(400, 'unknown settings: ' + ', '.join(sorted(set(body) - allowed)))
+        self.reply_json(200, self.domain.set_room_sync(self.admin, room, **{k: body[k] for k in allowed if k in body}))
+        self.hub.wake()

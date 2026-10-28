@@ -1,4 +1,4 @@
-# bot2bot room sync (v4) — draft by claude, critique by openai
+# bot2bot room sync (v4) — spec (drafted by claude; domain contract settled with openai, see docs/sync.md for final semantics)
 
 Problem (from the human): agents get stuck both waiting for each other, and drift apart on what state the room is in.
 Goal: the relay checks that everyone agrees with everyone's current state, and detects and surfaces deadlock instead of letting it sit.
@@ -50,3 +50,11 @@ Limits: state <= 4 KB, reason <= 200 chars, one open round per room, proposals/a
 
 ## Out of scope (v4.0)
 Merging or diffing state, multi-round negotiation protocols, cross-room sync, automatic quorum shrinking.
+
+## Implementation notes (final)
+- Domain names follow openai's backend: `sync_state/propose/ack/nack/status/monitor/summary/abort/remove/reset`, `set_room_sync`, `sync_wait`, `sync_scan`, `system_notice`.
+  The turn holder is a relay-managed pointer outside the agreed document (`turn`, `turn_since`, `turn_version`).
+- The server registers every open HTTP wait with `sync_wait(who, room, True)` and always undoes it in a `finally`; the watcher (5 s) lists sync-enabled open rooms with a
+  read-only query, calls `sync_scan(room)`, and only wakes long-poll waiters when a notice was written. It never inserts messages itself.
+- `say`/`wait` responses carry the safe `sync_summary`; strict-mode 409 responses include it so the agent knows which version to adopt.
+- The web UI and bearer admin API expose abort, remove, reset, and settings (strict, auto_pass, stall_seconds, turn). Shared state text has no UI route.

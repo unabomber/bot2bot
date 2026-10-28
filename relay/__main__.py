@@ -68,6 +68,25 @@ def build_parser():
     rt.add_argument('name')
     rt.add_argument('thread')
 
+    sync = sub.add_parser('sync', help='room agreement and stall controls').add_subparsers(dest='sync_cmd', required=True)
+    sync.add_parser('show', help='versions, who has agreed, drift and stalls (metadata only)').add_argument('room')
+    sync.add_parser('abort', help='abort the open agreement round').add_argument('room')
+    sr = sync.add_parser('remove', help='remove a participant from the round (everyone remaining must re-acknowledge)')
+    sr.add_argument('room')
+    sr.add_argument('name')
+    sv = sync.add_parser('reset', help='propose resetting shared state to a committed version')
+    sv.add_argument('room')
+    sv.add_argument('version', type=int)
+    ss = sync.add_parser('set', help='configure strict mode, auto-pass, stall time and turn holder')
+    ss.add_argument('room')
+    ss.add_argument('--strict', dest='strict', action='store_true', default=None, help='require the current state_version on every message')
+    ss.add_argument('--no-strict', dest='strict', action='store_false')
+    ss.add_argument('--auto-pass', dest='auto_pass', action='store_true', default=None)
+    ss.add_argument('--no-auto-pass', dest='auto_pass', action='store_false')
+    ss.add_argument('--stall-seconds', type=int, default=None)
+    ss.add_argument('--turn', default=None, help='name of the turn holder')
+    ss.add_argument('--clear-turn', action='store_true')
+
     inject = sub.add_parser('inject', help='send a message as the human')
     inject.add_argument('room')
     inject.add_argument('--to', default='*', help="'*' (everyone, default) or comma-separated names")
@@ -83,6 +102,17 @@ def _members_table(domain, admin, name):
     for m in domain.members(admin, name):
         mark = 'active' if m.get('active') else 'idle'
         print(f"{m['name']:<20} {m['role']:<8} {mark:<7} last_seen={_when(m.get('last_seen'))}")
+
+
+def _show_sync(s):
+    print(f"committed version {s['version']}  strict={s['strict']}  auto_pass={s['auto_pass']}  stall_seconds={s['stall_seconds']}  turn={s['turn']}")
+    print('STALLED (%s) since %s: %s' % (s['kind'], _when(s['since']), ', '.join(s['members'])) if s['stalled'] else 'not stalled')
+    rnd = s.get('round')
+    print(f"round v{rnd['version']} open: {len(rnd['acked'])}/{len(rnd['enrolled'])} acknowledged, waiting for {', '.join(s['unacked']) or 'nobody'}"
+          if rnd else 'no round open')
+    for name in sorted(s['acks']):
+        flag = 'DRIFT' if name in s['drift'] else 'in sync'
+        print(f"  {name:<20} agreed={s['acks'][name]}  {flag}  waiting_on={s['waiting_on'].get(name)}")
 
 
 def _watch(domain, admin, room, interval):
@@ -132,6 +162,24 @@ def run(args, store, domain):
         print(f"injected message {env['id']}")
     elif cmd == 'watch':
         _watch(domain, _admin(store), args.room, args.interval)
+    elif cmd == 'sync':
+        admin, room, sub = _admin(store), args.room, args.sync_cmd
+        if sub == 'show':
+            _show_sync(domain.sync_monitor(admin, room))
+        elif sub == 'abort':
+            domain.sync_abort(admin, room)
+        elif sub == 'remove':
+            domain.sync_remove(admin, room, args.name)
+        elif sub == 'reset':
+            domain.sync_reset(admin, room, args.version)
+        elif sub == 'set':
+            kwargs = {k: v for k, v in (('strict', args.strict), ('auto_pass', args.auto_pass),
+                                        ('stall_seconds', args.stall_seconds)) if v is not None}
+            if args.clear_turn:
+                kwargs['turn'] = None
+            elif args.turn is not None:
+                kwargs['turn'] = args.turn
+            _show_sync(domain.set_room_sync(admin, room, **kwargs))
     elif cmd == 'room':
         admin = _admin(store)
         sub = args.room_cmd
