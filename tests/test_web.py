@@ -306,6 +306,17 @@ class WebTests(unittest.TestCase):
         self.assertEqual(codes[:5], [401] * 5)
         self.assertEqual(codes[-1], 429)
 
+    def test_unencodable_login_tokens_are_counted_not_500(self):
+        codes = [self.request('POST', '/ui/login', raw='{"token":"\\ud800"}')[0] for _ in range(7)]
+        self.assertEqual(codes[:5], [401] * 5)
+        self.assertEqual(codes[-1], 429)
+
+    def test_query_strings_do_not_dodge_error_headers(self):
+        for path, kw in (('/ui?x=1', {'headers': {'Host': 'evil.example'}}), ('/ui/nope?x=1', {}), ('/ui/api/rooms?y=2', {})):
+            status, _, resp = self.request('GET', path, **kw)
+            self.assertGreaterEqual(status, 400, path)
+            self.assertIn("default-src 'none'", resp.getheader('Content-Security-Policy') or '', path)
+
     def test_error_responses_carry_security_headers(self):
         cases = [self.request('GET', '/ui/nope'), self.request('GET', '/ui', headers={'Host': 'evil.example'}),
                  self.request('POST', '/ui/login', {'token': 'x' * 43}),

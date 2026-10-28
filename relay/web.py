@@ -17,6 +17,7 @@ _STATIC = {
     '/ui/app.js': ('app.js', 'text/javascript; charset=utf-8'),
     '/ui/app.css': ('app.css', 'text/css; charset=utf-8'),
 }
+_TOKEN = re.compile(r'[A-Za-z0-9_-]{20,128}')
 ROOM = r'(?P<room>[A-Za-z0-9_-]{1,64})'
 NAME = r'(?P<name>[A-Za-z0-9_-]{1,64})'
 API = [(m, re.compile('/ui/api/' + p), h) for m, p, h in [
@@ -83,7 +84,11 @@ class _Request:
         body = self.h.body()
         token = body.get('token')
         # Every submitted value is hashed and goes through session_create, so malformed guesses are throttled too.
-        made = self.domain.session_create(hash_token(token if isinstance(token, str) else ''), self.h.client_address[0])
+        # Anything that is not a plausible credential (wrong type, odd characters, lone surrogates) is counted as a failed
+        # attempt using the hash of '', so it can neither crash the request nor dodge the persisted throttle.
+        if not (isinstance(token, str) and _TOKEN.fullmatch(token)):
+            token = ''
+        made = self.domain.session_create(hash_token(token), self.h.client_address[0])
         cookie = self.sec.session_cookie(made['session'])
         self.reply_json(200, {'csrf': made['csrf'], 'expires_at': made['expires_at']}, [('set-cookie', cookie)])
 

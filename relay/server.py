@@ -180,7 +180,8 @@ def make_handler(hub):
             self.wfile.write(data)
 
         def fail(self, code, message, headers=()):
-            if hub.web is not None and (self.path == '/ui' or self.path.startswith('/ui/')):
+            path = urlparse(self.path).path
+            if hub.web is not None and (path == '/ui' or path.startswith('/ui/')):
                 headers = [*headers, *hub.web.sec.headers()]  # every /ui error carries the same security headers
             self.reply(code, {'error': message, 'code': code}, headers)
 
