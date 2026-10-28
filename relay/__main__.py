@@ -34,6 +34,9 @@ def build_parser():
     serve = sub.add_parser('serve', help='run the relay')
     serve.add_argument('--host', default='127.0.0.1', help='use 0.0.0.0 to accept other machines')
     serve.add_argument('--port', type=int, default=8765)
+    serve.add_argument('--public-origin', default=None,
+                       help='exact browser origin of the web UI, e.g. https://relay.example.com (required for non-loopback hosts)')
+    serve.add_argument('--no-ui', action='store_true', help='do not serve the web admin UI')
     mint = sub.add_parser('mint', help='(default room) create an identity and print its token once')
     mint.add_argument('name')
     mint.add_argument('--role', choices=['agent', 'observer', 'admin'], default='agent')
@@ -103,8 +106,13 @@ def run(args, store, domain):
             has_admin = db.execute("SELECT 1 FROM agents WHERE role='admin' AND active=1").fetchone()
         if not has_admin:
             print('first start; admin token (shown once):', domain.mint_agent('admin', 'admin'))
-        server = make_server(domain, args.host, args.port)
+        try:
+            server = make_server(domain, args.host, args.port, args.public_origin, not args.no_ui)
+        except ValueError as err:
+            sys.exit(f'error: {err}')
         print(f'relay on http://{args.host}:{args.port} db={args.db}')
+        if not args.no_ui:
+            print(f'web admin: {server.public_origin}/ui (sign in with the admin token)')
         try:
             server.serve_forever()
         except KeyboardInterrupt:

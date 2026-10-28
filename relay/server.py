@@ -34,6 +34,7 @@ class Hub:
         self.domain = domain
         self.cv = threading.Condition()
         self.waits, self.buckets = {}, {}
+        self.web = None
 
     def take(self, name):
         """Token bucket; returns seconds to wait when empty, else 0."""
@@ -162,7 +163,10 @@ def make_handler(hub):
             pass
 
         def reply(self, code, body, headers=(), ctype='application/json'):
-            data = body.encode() if isinstance(body, str) else json.dumps(body).encode()
+            if isinstance(body, bytes):
+                data = body
+            else:
+                data = body.encode() if isinstance(body, str) else json.dumps(body).encode()
             self.send_response(code)
             self.send_header('content-type', ctype)
             self.send_header('content-length', str(len(data)))
@@ -224,6 +228,10 @@ def make_handler(hub):
             self.unread = self.framing()
             url = urlparse(self.path)
             q = parse_qs(url.query)
+            if url.path == '/ui' or url.path.startswith('/ui/'):
+                if hub.web is None:
+                    return self.fail(404, 'not found')
+                return hub.web.dispatch(self, method, url.path, q, _int)
             if 'key' in q or 'token' in q:
                 return self.fail(400, 'credentials in the URL are not accepted; use the Authorization header')
             header = self.headers.get('authorization')
@@ -261,8 +269,12 @@ def make_handler(hub):
                 self.fail(err.code, err.message, [('retry-after', str(retry))] if retry else ())
             except (BrokenPipeError, ConnectionResetError, TimeoutError):
                 self.close_connection = True
-            except Exception:
-                self.fail(500, 'internal error')
+            except Exception as err:
+                status = getattr(err, 'status', None)  # web_security.GuardError(status, message)
+                if isinstance(status, int) and 400 <= status < 500:
+                    self.fail(status, getattr(err, 'message', 'request rejected'))
+                else:
+                    self.fail(500, 'internal error')
 
         def do_GET(self):
             self.dispatch('get')
@@ -442,7 +454,24 @@ def make_handler(hub):
     return Handler
 
 
-def make_server(domain, host='127.0.0.1', port=8765):
-    server = ThreadingHTTPServer((host, port), make_handler(Hub(domain)))
+LOOPBACK = ('127.0.0.1', 'localhost', '::1')
+
+
+def make_server(domain, host='127.0.0.1', port=8765, public_origin=None, ui=True):
+    """Build the relay server. The web UI is served only when ui is true; its trusted origin is configured,
+    never derived from request headers (public_origin is required for non-loopback binds)."""
+    hub = Hub(domain)
+    server = ThreadingHTTPServer((host, port), make_handler(hub))
     server.daemon_threads = True
+    server.hub = hub
+    if ui:
+        from .web import Web
+        from .web_security import WebSecurity
+        if public_origin is None:
+            if host not in LOOPBACK:
+                server.server_close()
+                raise ValueError('--public-origin is required to serve the web UI on a non-loopback address')
+            public_origin = f'http://{host if host != "::1" else "[::1]"}:{server.server_address[1]}'
+        hub.web = Web(hub, WebSecurity(public_origin))
+        server.public_origin = public_origin
     return server
