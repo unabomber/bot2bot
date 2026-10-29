@@ -134,7 +134,8 @@ class Domain:
         to = json.loads(row['recipient']) if row['recipient'].startswith('[') else [row['recipient']]
         return {'id': row['public_id'], 'from': row['sender'], 'to': to[0] if len(to)==1 else to,
                 'thread': row['label'] if 'label' in row.keys() else row['thread'], 'text': row['text'],
-                'untrusted': True, 'ts': row['created']}
+                'untrusted': True, 'ts': row['created'],
+                'source':row['source'] if 'source' in row.keys() else 'agent'}
 
     def post(self, sender, to, thread, text, state_version=None):
         _name(sender)
@@ -677,6 +678,8 @@ class Domain:
             ack = db.execute("SELECT e.version,e.acked FROM sync_enrollments e JOIN sync_versions v ON v.room_id=e.room_id AND v.version=e.version WHERE e.room_id=? AND e.name=? AND e.generation=? AND e.acked IS NOT NULL AND v.status='committed' ORDER BY e.version DESC LIMIT 1",(room,name,member['generation'])).fetchone()
             status = statuses.get(name)
             known = ack['version'] if ack else None
+            if known is None and cfg['version']==0:
+                known = 0
             if status and (ack is None or status['declared']>ack['acked']):
                 known = status['state_version']
             acks[name] = known
@@ -723,6 +726,11 @@ class Domain:
             self._room_auth(db,p,room)
             view = self._sync_view(db,room)
             return {k:view[k] for k in ('version','round_open','unacked','stalled','strict')}
+
+    def sync_enabled_rooms(self):
+        """Internal watcher inventory; idle rooms never cause notice traffic."""
+        with self.store.transaction(read_only=True) as db:
+            return [r[0] for r in db.execute("SELECT s.room_id FROM sync_rooms s JOIN rooms r ON r.id=s.room_id WHERE s.enabled=1 AND r.status='open' ORDER BY s.room_id")]
 
     def sync_propose(self, p, room, base_version, state, phase=None, enrolled=None, deadline_seconds=None):
         _integer(base_version,'base_version')
@@ -946,8 +954,9 @@ class Domain:
                 db.execute("UPDATE sync_versions SET status='expired',ended=? WHERE room_id=? AND version=?",(now,room,version))
                 self._event(db,room,'relay','sync-expire',str(version))
             elif cfg['stalled_kind'] in ('silent','deadline') and pending is None:
-                latest = db.execute('SELECT status FROM sync_versions WHERE room_id=? ORDER BY version DESC LIMIT 1',(room,)).fetchone()
+                latest = db.execute('SELECT status,version FROM sync_versions WHERE room_id=? ORDER BY version DESC LIMIT 1',(room,)).fetchone()
                 if latest and latest['status']=='expired':
+                    version = latest['version']
                     kind,involved = cfg['stalled_kind'],json.loads(cfg['stalled_members'] or '[]')
             if kind is None:
                 expired = [n for n,s in statuses.items() if s['deadline'] is not None and now>=s['deadline']]
