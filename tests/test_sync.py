@@ -286,6 +286,18 @@ class SyncTests(unittest.TestCase):
         result = self.d.sync_scan('alpha',self.now)
         self.assertEqual((result['kind'],result['members']),('silent',['b']))
 
+    def test_long_wait_chain_reports_only_the_cycle_members(self):
+        names = ['n'+str(i).zfill(4) for i in range(1000)]
+        self.d.create_room(self.admin,'large',names[:100])
+        for n in names[100:]:
+            self.d.mint_member(self.admin,'large',n)
+        self.d.set_room_sync(self.admin,'large',stall_seconds=5)
+        with self.store.transaction() as db:
+            db.executemany('INSERT INTO sync_statuses VALUES (?,?,?,?,?,?,?,?)',
+                [('large',n,1,0,names[i+1] if i<999 else names[998],'private',self.now,None) for i,n in enumerate(names)])
+        scan = self.d.sync_scan('large',self.now)
+        self.assertEqual((scan['kind'],scan['members']),('cycle',names[-2:]))
+
 
 if __name__=='__main__':
     unittest.main()
