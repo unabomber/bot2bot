@@ -209,8 +209,11 @@
     const dirty = new Set();
     const fields = { strict: strictBox, auto_pass: autoBox, stall_seconds: stallInput, turn: turnSelect };
     for (const [key, input] of Object.entries(fields)) input.addEventListener('change', () => dirty.add(key));
+    // after a save, forget only the fields the admin did not edit again while the request was in flight
+    const sameValue = (key, sent) => (key === 'strict' ? strictBox.checked : key === 'auto_pass' ? autoBox.checked
+      : key === 'turn' ? (turnSelect.value || null) : Number(stallInput.value)) === sent;
     const postSync = async (action, body, done) => {
-      try { await api('POST', `rooms/${q}/sync/${action}`, body); notice(done); if (action === 'settings') dirty.clear(); pollSync(); }
+      try { await api('POST', `rooms/${q}/sync/${action}`, body); notice(done); if (action === 'settings') for (const key of Object.keys(body)) if (sameValue(key, body[key])) dirty.delete(key); pollSync(); }
       catch (err) { notice(err.message, true); }
     };
     const syncBox = el('section', {}, el('h2', {}, 'Agreement and stalls'), syncLine, roundLine,

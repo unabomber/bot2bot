@@ -247,6 +247,15 @@ class SyncServerTests(unittest.TestCase):
         self.assertIn('id', body)
         self.assertIn('sync', body)
 
+    def test_foreign_legacy_agent_cannot_trigger_a_scan_in_another_room(self):
+        self.call('POST', '/rooms/alpha/status', 'a', {'state_version': 0, 'waiting_on': 'b', 'deadline_seconds': 1})
+        time.sleep(1.3)    # the deadline has passed, so any scan would now record a notice
+        self.tok['old'] = self.domain.mint_agent('old', 'agent')
+        status, _ = self.call('POST', '/rooms/alpha/say', 'old', {'to': ['a'], 'text': 'x'})
+        self.assertEqual(status, 403)
+        rows = self.call('GET', '/rooms/alpha/messages?after=0', 'a')[1]['messages']
+        self.assertFalse([m for m in rows if m['from'] == 'relay'])   # the rejected call scanned nothing
+
     def test_failed_make_server_does_not_leak_a_watcher(self):
         before = {t for t in threading.enumerate() if t.name == 'sync-watcher'}
         with self.assertRaises(ValueError):

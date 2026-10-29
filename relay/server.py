@@ -359,6 +359,7 @@ def make_handler(hub):
         def tick(self, room):
             """Scan `room` for stalls on entry to say/wait; wake waiters if a notice was recorded."""
             try:
+                domain.room_state(self.reauth(), room)  # authorize first: a foreign credential must not trigger scans
                 if domain.sync_scan(room).get('notice'):
                     hub.wake()
             except DomainError:
