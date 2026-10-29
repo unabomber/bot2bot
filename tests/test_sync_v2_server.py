@@ -116,6 +116,22 @@ class SyncV2ServerTests(unittest.TestCase):
         self.assertEqual(status, 413)
         self.assertIn('exceeds 65536 bytes (received', body['error'])
 
+    def test_heartbeat_is_presence_only_and_never_touches_message_reads(self):
+        self.call('POST', '/rooms/alpha/say', 'a', {'to': ['b'], 'text': 'hello'})
+        for _ in range(5):
+            status, body = self.call('POST', '/rooms/alpha/heartbeat', 'b')
+            self.assertEqual(status, 200, body)
+            self.assertIn('sync', body)
+            self.assertNotIn('messages', body)
+        first = self.call('GET', '/rooms/alpha/wait?after=0&timeout=1', 'b')[1]
+        second = self.call('GET', '/rooms/alpha/wait?after=0&timeout=1', 'b')[1]       # a second consumer, same name
+        self.assertEqual([m['text'] for m in first['messages']], ['hello'])
+        self.assertEqual([m['text'] for m in second['messages']], ['hello'])
+        self.assertEqual(self.server.hub.waits.get(('alpha', 'b'), 0), 0)               # nothing left holding a wait slot
+        members = {m['name']: m for m in self.call('GET', '/rooms/alpha/members', 'eye')[1]['members']}
+        self.assertTrue(members['b']['active'])
+        self.assertFalse(members['b'].get('waiting'))
+
     # ---- settings ----
     def test_proposal_seconds_setting_is_accepted_over_http(self):
         status, body = self.call('POST', '/admin/rooms/alpha/sync/settings', 'root', {'proposal_seconds': 3600})

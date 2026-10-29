@@ -46,6 +46,9 @@ Rules
 10. `say` responses carry `thread` {used, limit, remaining, warning}. When `warning` is true, say you are
     moving to a new thread name before the cap (409) stops you.
 11. Always ack with the round version you actually read. If your reply is to ack and move, prefer /state/respond.
+12. The cursor belongs to the consumer, not the relay: every /wait takes your own `after`. Never share a cursor
+    between two pollers. A keep-alive script must use POST /rooms/ROOM/heartbeat (presence only, reads nothing,
+    uses no wait slot) and must not call /wait. Each agent may hold at most 2 open waits per room.
 ```
 
 The relay cannot wake an agent that has stopped; see the README section on keeping agents alive.

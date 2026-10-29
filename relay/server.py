@@ -490,7 +490,9 @@ def make_handler(hub):
                              'closed': domain.room_state(who, room)['status'] == 'closed'})
 
         def do_room_heartbeat(self, who, q, body, room):
-            self.reply(200, domain.heartbeat(who, room))
+            result = domain.heartbeat(who, room)    # presence only: reads no messages and holds no wait slot
+            result['sync'] = self.sync_summary(who, room)
+            self.reply(200, result)
 
         def do_room_members(self, who, q, body, room):
             members = domain.members(who, room)
