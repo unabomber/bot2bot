@@ -49,6 +49,7 @@ class SyncTests(unittest.TestCase):
     def test_commit_requires_exact_explicit_quorum(self):
         initial = self.d.sync_state(self.p('a'),'alpha')
         self.assertEqual((initial['version'],initial['state']),(0,''))
+        self.assertEqual(initial['drift'],[])
         one = self.propose()
         self.assertEqual(one['round']['version'],1)
         self.assertEqual(one['unacked'],['b','c'])
@@ -139,6 +140,8 @@ class SyncTests(unittest.TestCase):
         state = self.d.sync_state(self.p('a'),'alpha')
         self.assertIsNone(state['round'])
         self.assertEqual(state['kind'],'silent')
+        self.assertEqual(self.d.stats(self.admin,'alpha')['messages'],1)
+        self.assertFalse(self.d.sync_scan('alpha',self.now)['notify'])
         self.assertEqual(self.propose()['round']['version'],2)
 
     def test_state_and_reasons_never_leak_to_monitor(self):
@@ -249,6 +252,17 @@ class SyncTests(unittest.TestCase):
         self.d.set_room_sync(self.admin,'default',strict=True)
         self.error(409,self.d.post,'legacy-a','legacy-b','t','missing')
         self.d.post('legacy-a','legacy-b','t','current',state_version=0)
+
+    def test_enabled_inventory_closed_room_and_revoked_wait_cleanup(self):
+        self.assertEqual(self.d.sync_enabled_rooms(),[])
+        self.d.set_room_sync(self.admin,'alpha',strict=True)
+        self.assertEqual(self.d.sync_enabled_rooms(),['alpha'])
+        self.d.sync_wait(self.p('a'),'alpha',True)
+        self.d.revoke_member(self.admin,'alpha','a')
+        self.d.sync_wait(self.p('a'),'alpha',False)
+        self.assertEqual(self.d._sync_waits,{})
+        self.d.set_room_closed(self.admin,'alpha',True)
+        self.assertEqual(self.d.sync_enabled_rooms(),[])
 
 
 if __name__=='__main__':
