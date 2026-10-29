@@ -206,7 +206,7 @@ class _Request:
         self.hub.wake()
 
     def api_sync_settings(self, q, body, room):
-        allowed = {'strict', 'auto_pass', 'stall_seconds', 'turn'}
+        allowed = {'strict', 'auto_pass', 'stall_seconds', 'turn', 'proposal_seconds'}
         if set(body) - allowed:
             raise DomainError(400, 'unknown settings: ' + ', '.join(sorted(set(body) - allowed)))
         self.reply_json(200, self.domain.set_room_sync(self.admin, room, **{k: body[k] for k in allowed if k in body}))

@@ -202,12 +202,13 @@
     const strictBox = el('input', { type: 'checkbox', 'aria-label': 'Strict mode' });
     const autoBox = el('input', { type: 'checkbox', 'aria-label': 'Auto-pass turn when stalled' });
     const stallInput = el('input', { type: 'number', min: '5', max: '86400', step: '1', placeholder: 'stall seconds', 'aria-label': 'Stall seconds' });
+    const proposalInput = el('input', { type: 'number', min: '60', max: '86400', step: '1', placeholder: 'round deadline seconds', 'aria-label': 'Default round deadline in seconds' });
     const turnSelect = el('select', { 'aria-label': 'Turn holder' }, el('option', { value: '' }, '(no turn holder)'));
     const removeSelect = el('select', { 'aria-label': 'Participant to remove' });
     const resetInput = el('input', { type: 'number', min: '0', step: '1', placeholder: 'version', 'aria-label': 'Version to reset to' });
     // only fields the admin actually edited are sent, so a stale form can never overwrite newer settings
     const dirty = new Set();
-    const fields = { strict: strictBox, auto_pass: autoBox, stall_seconds: stallInput, turn: turnSelect };
+    const fields = { strict: strictBox, auto_pass: autoBox, stall_seconds: stallInput, turn: turnSelect, proposal_seconds: proposalInput };
     for (const [key, input] of Object.entries(fields)) input.addEventListener('change', () => dirty.add(key));
     // after a save, forget only the fields the admin did not edit again while the request was in flight
     const sameValue = (key, sent) => (key === 'strict' ? strictBox.checked : key === 'auto_pass' ? autoBox.checked
@@ -229,7 +230,7 @@
           postSync('reset', { version: v }, 'Reset proposed; members must acknowledge');
         } }, 'Propose reset to version')),
       el('div', { class: 'row' }, el('label', {}, strictBox, ' Strict: messages must carry the current version'),
-        el('label', {}, autoBox, ' Auto-pass turn when stalled'), stallInput, turnSelect,
+        el('label', {}, autoBox, ' Auto-pass turn when stalled'), stallInput, proposalInput, turnSelect,
         el('button', { class: 'primary', type: 'button', onclick: () => {
           const body = {};
           if (dirty.has('strict')) body.strict = strictBox.checked;
@@ -239,6 +240,11 @@
             const secs = Number(stallInput.value);
             if (!Number.isInteger(secs) || secs < 5 || secs > 86400) return notice('Stall seconds must be 5 to 86400', true);
             body.stall_seconds = secs;
+          }
+          if (dirty.has('proposal_seconds')) {
+            const secs = Number(proposalInput.value);
+            if (!Number.isInteger(secs) || secs < 60 || secs > 86400) return notice('Round deadline must be 60 to 86400 seconds', true);
+            body.proposal_seconds = secs;
           }
           if (!Object.keys(body).length) return notice('No settings changed');
           postSync('settings', body, 'Settings saved');
@@ -287,7 +293,8 @@
         + (s.turn ? ` Turn: ${s.turn}.` : '');
       roundLine.textContent = s.round_open && s.round
         ? `Round v${s.round.version} open: acknowledged ${s.round.acked.length} of ${s.round.enrolled.length}`
-          + (s.unacked.length ? `, waiting for ${s.unacked.join(', ')}` : '') + `, deadline ${when(s.round.deadline)}.`
+          + (s.unacked.length ? `, waiting for ${s.unacked.join(', ')}` : '') + `, deadline ${when(s.round.deadline)}`
+          + (s.round.remaining !== undefined ? ` (${Math.max(0, Math.round(s.round.remaining))} s left).` : '.')
         : 'No round open.';
       syncBody.replaceChildren(...names.map((n) => el('tr', {}, el('td', {}, n), el('td', {}, s.acks[n] === null ? '-' : s.acks[n]),
         el('td', {}, (s.drift || []).includes(n) ? 'DRIFT' : 'yes'), el('td', {}, (s.waiting_on && s.waiting_on[n]) || ''))));
@@ -300,6 +307,7 @@
       if (!dirty.has('strict')) strictBox.checked = !!s.strict;
       if (!dirty.has('auto_pass')) autoBox.checked = !!s.auto_pass;
       if (!dirty.has('stall_seconds') && document.activeElement !== stallInput) stallInput.value = s.stall_seconds;
+      if (s.proposal_seconds !== undefined && !dirty.has('proposal_seconds') && document.activeElement !== proposalInput) proposalInput.value = s.proposal_seconds;
       turnSelect.value = dirty.has('turn') ? (names.includes(turn) ? turn : '') : (s.turn || '');
     }
     async function refreshFeed() {

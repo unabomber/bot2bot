@@ -55,7 +55,7 @@ class Hub:
         with self.cv:
             return self.waits.get((room, name), 0)
 
-    def wait_for(self, room, name, fetch, closed, after, timeout):
+    def wait_for(self, room, name, fetch, closed, after, timeout, keep=None):
         """Long poll. fetch(after) returns rows (it revalidates credentials on every call and
         raises DomainError on revocation); closed() says whether the room stopped accepting writes.
         Returns (messages from others, cursor, room_closed)."""
@@ -69,7 +69,7 @@ class Hub:
                 rows = fetch(after)
                 if rows:
                     after = rows[-1]['id']
-                    mine = [m for m in rows if m['from'] != name]
+                    mine = [m for m in rows if m['from'] != name and (keep is None or keep(m))]
                     if mine:
                         return mine, after, False
                     continue
@@ -134,6 +134,9 @@ ROUTES = [(m, re.compile(p), h, r) for m, p, h, r in [
     ('POST', rf'/rooms/{ROOM}/state/propose', 'sync_propose', AGENT),
     ('POST', rf'/rooms/{ROOM}/state/ack', 'sync_ack', AGENT),
     ('POST', rf'/rooms/{ROOM}/state/nack', 'sync_nack', AGENT),
+    ('POST', rf'/rooms/{ROOM}/state/respond', 'sync_respond', AGENT),
+    ('POST', rf'/rooms/{ROOM}/state/renew', 'sync_renew', AGENT),
+    ('GET', rf'/rooms/{ROOM}/resume', 'sync_resume', AGENT),
     ('POST', rf'/rooms/{ROOM}/status', 'sync_status', AGENT),
     ('GET', rf'/rooms/{ROOM}/sync', 'sync_monitor', METADATA),
     # room administration (human)
@@ -346,9 +349,10 @@ def make_handler(hub):
             after = _int(q, 'after', 0)
             timeout = _int(q, 'timeout', MAX_WAIT, 0, MAX_WAIT)
             self.tick(room)
+            keep = level_filter(q)
             domain.sync_wait(who, room, True)     # lets stall detection see this open wait; always undone below
             try:
-                msgs, cursor, is_closed = hub.wait_for(room, who['name'], fetch, closed, after, timeout)
+                msgs, cursor, is_closed = hub.wait_for(room, who['name'], fetch, closed, after, timeout, keep=keep)
             finally:
                 domain.sync_wait(who, room, False)
             self.tick(room)
@@ -366,6 +370,21 @@ def make_handler(hub):
                 pass
             except Exception:
                 log.exception('sync scan failed for room %s', room)
+
+        def thread_budget(self, who, room, thread):
+            """Message budget of `thread` as metadata ({used, limit, remaining, warning}); None if unavailable."""
+            try:
+                budget = dict(domain.room_thread_budget(who, room, thread))
+            except (DomainError, AttributeError):
+                return None
+            budget['warning'] = budget['remaining'] * 5 <= budget['limit']   # 80% used
+            return budget
+
+        def cap_error(self, err, who, room, thread):
+            """Structured 409 when a thread is full, so agents can switch threads without parsing prose."""
+            body = {'error': err.message, 'code': 409, 'thread': self.thread_budget(who, room, thread),
+                    'hint': 'start a new thread name and say so, or ask the admin to reset this one'}
+            self.reply(409, body)
 
         def sync_summary(self, who, room):
             """Safe sync summary for responses (version, round_open, unacked, stalled, strict), or None if unavailable."""
@@ -413,6 +432,8 @@ def make_handler(hub):
                 msg = domain.post(who['name'], body.get('to'), body.get('thread', 'main'), body['text'],
                                   state_version=body.get('state_version'))
             except DomainError as err:
+                if err.code == 409 and 'thread budget' in err.message:
+                    return self.cap_error(err, who, DEFAULT_ROOM, body.get('thread', 'main'))
                 if err.code == 409 and 'state_version' in err.message:
                     return self.reply(409, {'error': err.message, 'code': 409, 'sync': self.sync_summary(who, DEFAULT_ROOM)})
                 raise
@@ -449,13 +470,15 @@ def make_handler(hub):
             try:
                 env = domain.room_post(who, room, to, thread, text, state_version=body.get('state_version'))
             except DomainError as err:
+                if err.code == 409 and 'thread budget' in err.message:
+                    return self.cap_error(err, who, room, thread)
                 if err.code == 409 and 'state_version' in err.message:
                     # strict mode: tell the agent which version it must re-sync to
                     return self.reply(409, {'error': err.message, 'code': 409, 'sync': self.sync_summary(who, room)})
                 raise
             hub.wake()
             self.tick(room)
-            self.reply(200, {'id': env['id'], 'sync': self.sync_summary(who, room)})
+            self.reply(200, {'id': env['id'], 'sync': self.sync_summary(who, room), 'thread': self.thread_budget(who, room, thread)})
 
         def do_room_wait(self, who, q, body, room):
             self.wait_reply(who, q, room)
@@ -515,6 +538,22 @@ def make_handler(hub):
             self.reply(200, domain.sync_nack(who, room, body.get('version'), body.get('reason', '')))
             hub.wake()
 
+        def do_sync_respond(self, who, q, body, room):
+            result = domain.sync_respond(who, room, body.get('ack_version'), body.get('base_version'), body.get('state'),
+                                         body.get('phase'), body.get('deadline_seconds'), body.get('key'))
+            hub.wake()
+            self.reply(200, result)
+
+        def do_sync_renew(self, who, q, body, room):
+            result = domain.sync_renew(who, room, body.get('version'), body.get('seconds'))
+            hub.wake()
+            self.reply(200, result)
+
+        def do_sync_resume(self, who, q, body, room):
+            result = domain.sync_resume(who, room)
+            hub.wake()  # resume scans like state does
+            self.reply(200, result)
+
         def do_sync_status(self, who, q, body, room):
             result = domain.sync_status(who, room, body.get('state_version'), body.get('waiting_on'),
                                         body.get('reason', ''), body.get('deadline_seconds'))
@@ -540,7 +579,7 @@ def make_handler(hub):
             hub.wake()
 
         def do_admin_sync_settings(self, who, q, body, room):
-            allowed = {'strict', 'auto_pass', 'stall_seconds', 'turn'}
+            allowed = {'strict', 'auto_pass', 'stall_seconds', 'turn', 'proposal_seconds'}
             unknown = set(body) - allowed
             if unknown:
                 raise DomainError(400, 'unknown settings: ' + ', '.join(sorted(unknown)))
@@ -593,6 +632,18 @@ def make_handler(hub):
 
 
 SYNC_INTERVAL = 5.0
+LEVELS = {'info': 0, 'warn': 1, 'critical': 2}
+
+
+def level_filter(q):
+    """wait?level=warn|critical hides lower-level system notices (never agent or human messages)."""
+    wanted = (q.get('level') or [None])[0] if isinstance(q.get('level'), list) else q.get('level')
+    if wanted in (None, '', 'info'):
+        return None
+    if wanted not in LEVELS:
+        raise DomainError(400, 'level must be info, warn or critical')
+    floor = LEVELS[wanted]
+    return lambda m: m.get('source') != 'system' or LEVELS.get(m.get('level', 'warn'), 1) >= floor
 
 
 def enabled_sync_rooms(domain):

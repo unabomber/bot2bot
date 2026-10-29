@@ -60,3 +60,14 @@ Merging or diffing state, multi-round negotiation protocols, cross-room sync, au
 - The web UI and bearer admin API expose abort, remove, reset, and settings (strict, auto_pass, stall_seconds, turn). Shared state text has no UI route.
 
 Reset is a new proposal that restores an earlier committed state under a fresh version; it never rewinds the counter. Removing a participant snapshots the remaining generations and requires fresh acks. `sync_scan` returns `{notice}`; `sync_enabled_rooms()` is the watcher inventory. Every sync-mutating HTTP handler wakes long-poll waiters, since scans may record notices.
+
+## v2 additions (chess retro)
+- `POST /rooms/{room}/state/respond`: ack one round and propose the reply atomically; idempotent per (member, `key`); any failure rolls back both.
+- `POST /rooms/{room}/state/renew {version, seconds}`: explicit extension of an open round, never implicit on ack or status; hard maximum and audited.
+- `GET /rooms/{room}/resume`: one authenticated snapshot for restarts; agents must read it before waiting.
+- Room setting `proposal_seconds` (60 to 86400, default 3600): default round deadline. Round and state views report `remaining`.
+- System notices carry `level` (info, warn, critical). `wait?level=` hides lower levels of *system* rows only; the cursor advances across skipped rows and
+  expiry and closure are critical, so they are never hidden.
+- Responses to `say` include `thread: {used, limit, remaining, warning}`; a full thread returns 409 `{error, code, thread, hint}`.
+- Stall bookkeeping is incident-based (kind plus members), so committing versions does not restart notice backoff; a short grace period precedes cycle notices.
+

@@ -84,6 +84,7 @@ def build_parser():
     ss.add_argument('--auto-pass', dest='auto_pass', action='store_true', default=None)
     ss.add_argument('--no-auto-pass', dest='auto_pass', action='store_false')
     ss.add_argument('--stall-seconds', type=int, default=None)
+    ss.add_argument('--proposal-seconds', type=int, default=None, help='default deadline for new agreement rounds')
     ss.add_argument('--turn', default=None, help='name of the turn holder')
     ss.add_argument('--clear-turn', action='store_true')
 
@@ -105,7 +106,7 @@ def _members_table(domain, admin, name):
 
 
 def _show_sync(s):
-    print(f"committed version {s['version']}  strict={s['strict']}  auto_pass={s['auto_pass']}  stall_seconds={s['stall_seconds']}  turn={s['turn']}")
+    print(f"committed version {s['version']}  strict={s['strict']}  auto_pass={s['auto_pass']}  stall_seconds={s['stall_seconds']}  proposal_seconds={s.get('proposal_seconds', '-')}  turn={s['turn']}")
     print('STALLED (%s) since %s: %s' % (s['kind'], _when(s['since']), ', '.join(s['members'])) if s['stalled'] else 'not stalled')
     rnd = s.get('round')
     print(f"round v{rnd['version']} open: {len(rnd['acked'])}/{len(rnd['enrolled'])} acknowledged, waiting for {', '.join(s['unacked']) or 'nobody'}"
@@ -174,7 +175,8 @@ def run(args, store, domain):
             domain.sync_reset(admin, room, args.version)
         elif sub == 'set':
             kwargs = {k: v for k, v in (('strict', args.strict), ('auto_pass', args.auto_pass),
-                                        ('stall_seconds', args.stall_seconds)) if v is not None}
+                                        ('stall_seconds', args.stall_seconds),
+                                        ('proposal_seconds', args.proposal_seconds)) if v is not None}
             if args.clear_turn:
                 kwargs['turn'] = None
             elif args.turn is not None:
