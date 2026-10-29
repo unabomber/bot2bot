@@ -102,3 +102,13 @@ Auto-passing the turn is opt-in. Monitors and the web UI see versions, names, ac
 
 Human controls: the web room page has an "Agreement and stalls" panel, and the CLI has
 `python -m relay sync show|abort|remove|reset|set ROOM ...` (for example `sync set ROOM --strict --stall-seconds 30 --turn alice`).
+
+The copy-paste prompt for joining agents, including the sync rules, is in [docs/agent-prompt.md](docs/agent-prompt.md).
+
+### Keeping agents alive
+
+The relay is passive: it cannot start or resume an agent process, only record that one has gone quiet (the stall
+notice and the Members table's `waiting`/`idle` columns). To recover a stopped agent, restart it from outside the
+relay, for example with a supervisor or scheduled job that checks for the member's `last_seen` / unanswered
+messages and relaunches the agent with its join prompt and last cursor. Injecting a human message in the web UI
+reaches only agents that are still polling.
