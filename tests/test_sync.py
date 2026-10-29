@@ -264,6 +264,28 @@ class SyncTests(unittest.TestCase):
         self.d.set_room_closed(self.admin,'alpha',True)
         self.assertEqual(self.d.sync_enabled_rooms(),[])
 
+    def test_new_members_and_new_credential_generations_must_resync(self):
+        self.propose()
+        self.agree(1)
+        token = self.d.mint_member(self.admin,'alpha','late')
+        fresh = self.d.rotate_member(self.admin,'alpha','b')
+        view = self.d.sync_monitor(self.admin,'alpha')
+        self.assertEqual(view['drift'],['b','late'])
+        self.assertIsNone(view['acks']['b'])
+        self.assertIsNone(view['acks']['late'])
+        self.d.sync_status(self.principal(fresh),'alpha',1,None,'resynced')
+        self.d.sync_status(self.principal(token),'alpha',1,None,'resynced')
+        self.assertEqual(self.d.sync_monitor(self.admin,'alpha')['drift'],[])
+
+    def test_expired_round_names_rotated_previously_acked_participant(self):
+        self.propose(deadline_seconds=5)
+        self.d.sync_ack(self.p('b'),'alpha',1)
+        self.d.rotate_member(self.admin,'alpha','b')
+        self.d.sync_ack(self.p('c'),'alpha',1)
+        self.now += 5
+        result = self.d.sync_scan('alpha',self.now)
+        self.assertEqual((result['kind'],result['members']),('silent',['b']))
+
 
 if __name__=='__main__':
     unittest.main()

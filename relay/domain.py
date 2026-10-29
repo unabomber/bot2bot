@@ -673,7 +673,9 @@ class Domain:
             enrolled = [dict(r) for r in db.execute("SELECT name,generation,NULL AS acked FROM room_members WHERE room_id=? AND active=1 AND role='agent' ORDER BY name",(room,))]
         statuses = {r['name']:dict(r) for r in db.execute('SELECT s.* FROM sync_statuses s JOIN room_members m ON m.room_id=s.room_id AND m.name=s.name AND m.generation=s.generation AND m.active=1 WHERE s.room_id=?',(room,))}
         acks, drift = {}, []
-        for member in enrolled:
+        participants = {e['name']:e for e in enrolled}
+        participants.update({r['name']:dict(r) for r in db.execute("SELECT name,generation FROM room_members WHERE room_id=? AND active=1 AND role='agent' ORDER BY name",(room,))})
+        for member in sorted(participants.values(),key=lambda m:m['name']):
             name = member['name']
             ack = db.execute("SELECT e.version,e.acked FROM sync_enrollments e JOIN sync_versions v ON v.room_id=e.room_id AND v.version=e.version WHERE e.room_id=? AND e.name=? AND e.generation=? AND e.acked IS NOT NULL AND v.status='committed' ORDER BY e.version DESC LIMIT 1",(room,name,member['generation'])).fetchone()
             status = statuses.get(name)
@@ -682,6 +684,8 @@ class Domain:
                 known = 0
             if status and (ack is None or status['declared']>ack['acked']):
                 known = status['state_version']
+            if not db.execute("SELECT 1 FROM room_members WHERE room_id=? AND name=? AND active=1 AND role='agent'",(room,name)).fetchone():
+                known = None
             acks[name] = known
             if known!=cfg['version']:
                 drift.append(name)
@@ -949,7 +953,10 @@ class Domain:
             names = [e['name'] for e in enrolled] or [r[0] for r in db.execute("SELECT name FROM room_members WHERE room_id=? AND active=1 AND role='agent' ORDER BY name",(room,))]
             statuses = {r['name']:dict(r) for r in db.execute('SELECT s.* FROM sync_statuses s JOIN room_members m ON m.room_id=s.room_id AND m.name=s.name AND m.generation=s.generation AND m.active=1 WHERE s.room_id=?',(room,)) if r['name'] in names}
             if pending and now>=pending['deadline']:
-                involved = [e['name'] for e in enrolled if e['acked'] is None]
+                for e in enrolled:
+                    member = db.execute("SELECT generation FROM room_members WHERE room_id=? AND name=? AND active=1 AND role='agent'",(room,e['name'])).fetchone()
+                    if e['acked'] is None or member is None or member['generation']!=e['generation']:
+                        involved.append(e['name'])
                 kind = 'silent' if involved else 'deadline'
                 db.execute("UPDATE sync_versions SET status='expired',ended=? WHERE room_id=? AND version=?",(now,room,version))
                 self._event(db,room,'relay','sync-expire',str(version))
