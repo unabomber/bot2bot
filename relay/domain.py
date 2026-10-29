@@ -971,13 +971,16 @@ class Domain:
                     kind,involved = 'deadline',sorted(expired)
             if kind is None:
                 cycles = set()
+                visited = set()
                 for start in names:
-                    path, node = [], start
-                    while node in statuses and node not in path:
+                    path, positions, node = [], {}, start
+                    while node in statuses and node not in visited and node not in positions:
+                        positions[node] = len(path)
                         path.append(node)
                         node = statuses[node]['waiting_on']
-                    if node in path:
-                        cycles.update(path[path.index(node):])
+                    if node in positions:
+                        cycles.update(path[positions[node]:])
+                    visited.update(path)
                 if cycles:
                     kind,involved = 'cycle',sorted(cycles)
             if kind is None and names:
