@@ -1,5 +1,6 @@
 """HTTP layer: authentication, limits, envelopes and long polling over relay.domain."""
 import json
+import logging
 import re
 import threading
 import time
@@ -17,6 +18,7 @@ DISCARD_SECONDS = 0.25
 SOCKET_TIMEOUT = 30
 BUCKET_BURST, BUCKET_RATE = 20, 5.0
 DEFAULT_ROOM = 'default'
+log = logging.getLogger('bot2bot.relay')
 LEGACY_PREFIXES = ('legacy_', 'admin_pause', 'admin_resume')
 
 
@@ -127,7 +129,19 @@ ROUTES = [(m, re.compile(p), h, r) for m, p, h, r in [
     ('POST', rf'/rooms/{ROOM}/task', 'room_task', AGENT),
     ('POST', rf'/rooms/{ROOM}/done', 'room_done', AGENT),
     ('POST', rf'/rooms/{ROOM}/release', 'room_release', AGENT),
+    # room sync: shared state, agreement rounds, status declarations
+    ('GET', rf'/rooms/{ROOM}/state', 'sync_state', AGENT),
+    ('POST', rf'/rooms/{ROOM}/state/propose', 'sync_propose', AGENT),
+    ('POST', rf'/rooms/{ROOM}/state/ack', 'sync_ack', AGENT),
+    ('POST', rf'/rooms/{ROOM}/state/nack', 'sync_nack', AGENT),
+    ('POST', rf'/rooms/{ROOM}/status', 'sync_status', AGENT),
+    ('GET', rf'/rooms/{ROOM}/sync', 'sync_monitor', METADATA),
     # room administration (human)
+    ('GET', rf'/admin/rooms/{ROOM}/state', 'admin_sync_state', ADMIN),
+    ('POST', rf'/admin/rooms/{ROOM}/sync/abort', 'admin_sync_abort', ADMIN),
+    ('POST', rf'/admin/rooms/{ROOM}/sync/remove', 'admin_sync_remove', ADMIN),
+    ('POST', rf'/admin/rooms/{ROOM}/sync/reset', 'admin_sync_reset', ADMIN),
+    ('POST', rf'/admin/rooms/{ROOM}/sync/settings', 'admin_sync_settings', ADMIN),
     ('GET', r'/admin/rooms', 'admin_rooms', ADMIN),
     ('POST', r'/admin/rooms', 'admin_create_room', ADMIN),
     ('POST', rf'/admin/rooms/{ROOM}/close', 'admin_close', ADMIN),
@@ -330,11 +344,35 @@ def make_handler(hub):
                 return domain.room_state(self.reauth(), room)['status'] == 'closed'
 
             after = _int(q, 'after', 0)
-            msgs, cursor, is_closed = hub.wait_for(room, who['name'], fetch, closed, after,
-                                                   _int(q, 'timeout', MAX_WAIT, 0, MAX_WAIT))
+            timeout = _int(q, 'timeout', MAX_WAIT, 0, MAX_WAIT)
+            self.tick(room)
+            domain.sync_wait(who, room, True)     # lets stall detection see this open wait; always undone below
+            try:
+                msgs, cursor, is_closed = hub.wait_for(room, who['name'], fetch, closed, after, timeout)
+            finally:
+                domain.sync_wait(who, room, False)
+            self.tick(room)
             is_closed = is_closed or closed()  # always report the actual room state, even with queued messages
             self.reply(200, {'messages': msgs, 'cursor': cursor, 'timeout': not msgs and not is_closed,
-                             'closed': is_closed})
+                             'closed': is_closed, 'sync': self.sync_summary(who, room)})
+
+        def tick(self, room):
+            """Scan `room` for stalls on entry to say/wait; wake waiters if a notice was recorded."""
+            try:
+                domain.room_state(self.reauth(), room)  # authorize first: a foreign credential must not trigger scans
+                if domain.sync_scan(room).get('notice'):
+                    hub.wake()
+            except DomainError:
+                pass
+            except Exception:
+                log.exception('sync scan failed for room %s', room)
+
+        def sync_summary(self, who, room):
+            """Safe sync summary for responses (version, round_open, unacked, stalled, strict), or None if unavailable."""
+            try:
+                return domain.sync_summary(who, room)
+            except DomainError:
+                return None
 
         def say_args(self, body):
             if not isinstance(body.get('text'), str):
@@ -370,9 +408,17 @@ def make_handler(hub):
         def do_legacy_say(self, who, q, body):
             if not isinstance(body.get('text'), str):
                 raise DomainError(400, 'text required')
-            msg = domain.post(who['name'], body.get('to'), body.get('thread', 'main'), body['text'])
+            self.tick(DEFAULT_ROOM)
+            try:
+                msg = domain.post(who['name'], body.get('to'), body.get('thread', 'main'), body['text'],
+                                  state_version=body.get('state_version'))
+            except DomainError as err:
+                if err.code == 409 and 'state_version' in err.message:
+                    return self.reply(409, {'error': err.message, 'code': 409, 'sync': self.sync_summary(who, DEFAULT_ROOM)})
+                raise
             hub.wake()
-            self.reply(200, {'id': msg['id']})
+            self.tick(DEFAULT_ROOM)
+            self.reply(200, {'id': msg['id'], 'sync': self.sync_summary(who, DEFAULT_ROOM)})
 
         def do_legacy_task(self, who, q, body):
             self.reply(200, domain.create_task(who['name'], body.get('title'), body.get('files')))
@@ -399,9 +445,17 @@ def make_handler(hub):
         # ---- room routes ----
         def do_room_say(self, who, q, body, room):
             to, thread, text = self.say_args(body)
-            env = domain.room_post(who, room, to, thread, text)
+            self.tick(room)
+            try:
+                env = domain.room_post(who, room, to, thread, text, state_version=body.get('state_version'))
+            except DomainError as err:
+                if err.code == 409 and 'state_version' in err.message:
+                    # strict mode: tell the agent which version it must re-sync to
+                    return self.reply(409, {'error': err.message, 'code': 409, 'sync': self.sync_summary(who, room)})
+                raise
             hub.wake()
-            self.reply(200, {'id': env['id']})
+            self.tick(room)
+            self.reply(200, {'id': env['id'], 'sync': self.sync_summary(who, room)})
 
         def do_room_wait(self, who, q, body, room):
             self.wait_reply(who, q, room)
@@ -440,6 +494,58 @@ def make_handler(hub):
 
         def do_room_release(self, who, q, body, room):
             self.reply(200, domain.room_task_release(who, room, body.get('id')))
+
+        # ---- room sync ----
+        def do_sync_state(self, who, q, body, room):
+            result = domain.sync_state(who, room)
+            hub.wake()  # a scan inside sync_state may have recorded a notice
+            self.reply(200, result)
+
+        def do_sync_propose(self, who, q, body, room):
+            result = domain.sync_propose(who, room, body.get('base_version'), body.get('state'), body.get('phase'),
+                                         body.get('enrolled'), body.get('deadline_seconds'))
+            hub.wake()
+            self.reply(200, result)
+
+        def do_sync_ack(self, who, q, body, room):
+            self.reply(200, domain.sync_ack(who, room, body.get('version')))
+            hub.wake()
+
+        def do_sync_nack(self, who, q, body, room):
+            self.reply(200, domain.sync_nack(who, room, body.get('version'), body.get('reason', '')))
+            hub.wake()
+
+        def do_sync_status(self, who, q, body, room):
+            result = domain.sync_status(who, room, body.get('state_version'), body.get('waiting_on'),
+                                        body.get('reason', ''), body.get('deadline_seconds'))
+            hub.wake()
+            self.reply(200, result)
+
+        def do_sync_monitor(self, who, q, body, room):
+            self.reply(200, domain.sync_monitor(who, room))
+
+        def do_admin_sync_state(self, who, q, body, room):
+            self.reply(200, domain.sync_state(who, room))
+
+        def do_admin_sync_abort(self, who, q, body, room):
+            self.reply(200, domain.sync_abort(who, room))
+            hub.wake()
+
+        def do_admin_sync_remove(self, who, q, body, room):
+            self.reply(200, domain.sync_remove(who, room, body.get('name')))
+            hub.wake()
+
+        def do_admin_sync_reset(self, who, q, body, room):
+            self.reply(200, domain.sync_reset(who, room, body.get('version')))
+            hub.wake()
+
+        def do_admin_sync_settings(self, who, q, body, room):
+            allowed = {'strict', 'auto_pass', 'stall_seconds', 'turn'}
+            unknown = set(body) - allowed
+            if unknown:
+                raise DomainError(400, 'unknown settings: ' + ', '.join(sorted(unknown)))
+            self.reply(200, domain.set_room_sync(who, room, **{k: body[k] for k in allowed if k in body}))  # turn may be null
+            hub.wake()
 
         # ---- room administration ----
         def do_admin_rooms(self, who, q, body):
@@ -486,14 +592,70 @@ def make_handler(hub):
     return Handler
 
 
+SYNC_INTERVAL = 5.0
+
+
+def enabled_sync_rooms(domain):
+    """Open rooms that use sync, so the watcher never scans idle rooms."""
+    return domain.sync_enabled_rooms()
+
+
+class Watcher(threading.Thread):
+    """Background stall scan for rooms that use sync. sync_scan is idempotent and records its own notices;
+    this thread only wakes long-polling waiters when a notice was written."""
+
+    def __init__(self, hub, interval, rooms=None):
+        super().__init__(daemon=True, name='sync-watcher')
+        self.hub, self.interval, self.stop = hub, interval, threading.Event()
+        self.rooms = rooms or (lambda: enabled_sync_rooms(hub.domain))
+
+    def scan_once(self):
+        domain = self.hub.domain
+        for room in self.rooms():
+            try:
+                result = domain.sync_scan(room)
+            except DomainError:
+                continue  # expected: room closed or removed mid-scan
+            except Exception:
+                log.exception('sync scan failed for room %s', room)  # one bad room must not starve the others
+                continue
+            if result.get('notice'):
+                self.hub.wake()
+
+    def run(self):
+        while not self.stop.wait(self.interval):
+            try:
+                self.scan_once()
+            except Exception:  # never let the watcher thread die, but never fail silently either
+                log.exception('sync watcher pass failed')
+
+
+class RelayServer(ThreadingHTTPServer):
+    watcher = None
+
+    def stop_watcher(self):
+        if self.watcher is not None:
+            self.watcher.stop.set()
+            if self.watcher.is_alive() and self.watcher is not threading.current_thread():
+                self.watcher.join(5)
+
+    def shutdown(self):
+        self.stop_watcher()
+        super().shutdown()
+
+    def server_close(self):
+        self.stop_watcher()
+        super().server_close()
+
+
 LOOPBACK = ('127.0.0.1', 'localhost', '::1')
 
 
-def make_server(domain, host='127.0.0.1', port=8765, public_origin=None, ui=True):
+def make_server(domain, host='127.0.0.1', port=8765, public_origin=None, ui=True, sync_interval=SYNC_INTERVAL):
     """Build the relay server. The web UI is served only when ui is true; its trusted origin is configured,
     never derived from request headers (public_origin is required for non-loopback binds)."""
     hub = Hub(domain)
-    server = ThreadingHTTPServer((host, port), make_handler(hub))
+    server = RelayServer((host, port), make_handler(hub))
     server.daemon_threads = True
     server.hub = hub
     if ui:
@@ -506,4 +668,7 @@ def make_server(domain, host='127.0.0.1', port=8765, public_origin=None, ui=True
             public_origin = f'http://{host if host != "::1" else "[::1]"}:{server.server_address[1]}'
         hub.web = Web(hub, WebSecurity(public_origin))
         server.public_origin = public_origin
+    if sync_interval:
+        server.watcher = Watcher(hub, sync_interval)
+        server.watcher.start()
     return server

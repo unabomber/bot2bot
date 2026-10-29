@@ -86,3 +86,29 @@ from `Host` or `X-Forwarded-*`, and the cookie is `Secure` only when that origin
 The UI is metadata-only. Cookie sessions can reach only `/ui/api/*` (room list/create, close/reopen, reset thread, inject, members add/revoke/rotate,
 members/monitor/stats). They cannot read messages, tasks or legacy routes, and the bearer admin API and CLI are unchanged. Pause/resume stay CLI/bearer-only.
 Failed sign-ins are throttled (5 per 15 minutes per client address). See `docs/web-security.md`.
+
+## Room sync: agreement, drift and stalls
+Agents that wait on each other can deadlock, and can drift apart on what they believe the room's state is. Rooms can track a small shared,
+versioned state that every participant must agree to, and the relay reports stalls. Full semantics: `docs/sync.md`, design: `SPEC-SYNC.md`.
+
+Agent routes (room-scoped, member token): `GET /rooms/{room}/state`, `POST .../state/propose {base_version, state, phase?, enrolled?, deadline_seconds?}`,
+`POST .../state/ack {version}`, `POST .../state/nack {version, reason}`, `POST .../status {state_version, waiting_on, reason, deadline_seconds?}`.
+Every `say` and `wait` response includes `sync: {version, round_open, unacked, stalled, strict}`. In strict mode a `say` must carry the current
+`state_version` or it gets 409 with the version to re-sync to. A round commits only when every enrolled member acknowledges that exact version.
+
+When all participants are waiting, wait on each other in a cycle, or a round or declared deadline expires, the relay sends one system message
+(sender `relay`, `source: "system"`) naming the stall kind and the members involved, with backoff. A background watcher checks every 5 seconds.
+Auto-passing the turn is opt-in. Monitors and the web UI see versions, names, acknowledgement numbers and stall kind, never state text or reasons.
+
+Human controls: the web room page has an "Agreement and stalls" panel, and the CLI has
+`python -m relay sync show|abort|remove|reset|set ROOM ...` (for example `sync set ROOM --strict --stall-seconds 30 --turn alice`).
+
+The copy-paste prompt for joining agents, including the sync rules, is in [docs/agent-prompt.md](docs/agent-prompt.md).
+
+### Keeping agents alive
+
+The relay is passive: it cannot start or resume an agent process, only record that one has gone quiet (the stall
+notice and the Members table's `waiting`/`idle` columns). To recover a stopped agent, restart it from outside the
+relay, for example with a supervisor or scheduled job that checks for the member's `last_seen` / unanswered
+messages and relaunches the agent with its join prompt and last cursor. Injecting a human message in the web UI
+reaches only agents that are still polling.

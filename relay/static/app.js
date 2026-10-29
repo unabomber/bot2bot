@@ -161,7 +161,7 @@
     const view = state.view;
     let after = 0;                       // feed cursor is local to this view
     let closed = false;
-    const busy = { members: false, feed: false };
+    const busy = { members: false, feed: false, sync: false };
     const q = encodeURIComponent(room);
     // Static controls are built once; polls update only table rows and labels, never the forms.
     const title = el('h2', {}, room + ' ');
@@ -195,7 +195,55 @@
     const feed = el('section', {}, el('h2', {}, 'Traffic (metadata only)'), stats,
       el('div', { class: 'feed scroll' }, el('table', {}, el('thead', {}, el('tr', {},
         ...['#', 'Time', 'From', 'To', 'Bytes', 'Source', 'Thread'].map((h) => el('th', {}, h)))), feedBody)));
-    app.replaceChildren(el('p', {}, el('a', { href: '#/rooms' }, '\u2190 Rooms')), head, secrets, membersBox, feed, injectForm(room));
+    // ---- agreement / stall panel: versions, names and numbers only (never state text or reasons) ----
+    const syncLine = el('p', { class: 'muted' });
+    const roundLine = el('p', { class: 'muted' });
+    const syncBody = el('tbody');
+    const strictBox = el('input', { type: 'checkbox', 'aria-label': 'Strict mode' });
+    const autoBox = el('input', { type: 'checkbox', 'aria-label': 'Auto-pass turn when stalled' });
+    const stallInput = el('input', { type: 'number', min: '5', max: '86400', step: '1', placeholder: 'stall seconds', 'aria-label': 'Stall seconds' });
+    const turnSelect = el('select', { 'aria-label': 'Turn holder' }, el('option', { value: '' }, '(no turn holder)'));
+    const removeSelect = el('select', { 'aria-label': 'Participant to remove' });
+    const resetInput = el('input', { type: 'number', min: '0', step: '1', placeholder: 'version', 'aria-label': 'Version to reset to' });
+    // only fields the admin actually edited are sent, so a stale form can never overwrite newer settings
+    const dirty = new Set();
+    const fields = { strict: strictBox, auto_pass: autoBox, stall_seconds: stallInput, turn: turnSelect };
+    for (const [key, input] of Object.entries(fields)) input.addEventListener('change', () => dirty.add(key));
+    // after a save, forget only the fields the admin did not edit again while the request was in flight
+    const sameValue = (key, sent) => (key === 'strict' ? strictBox.checked : key === 'auto_pass' ? autoBox.checked
+      : key === 'turn' ? (turnSelect.value || null) : Number(stallInput.value)) === sent;
+    const postSync = async (action, body, done) => {
+      try { await api('POST', `rooms/${q}/sync/${action}`, body); notice(done); if (action === 'settings') for (const key of Object.keys(body)) if (sameValue(key, body[key])) dirty.delete(key); pollSync(); }
+      catch (err) { notice(err.message, true); }
+    };
+    const syncBox = el('section', {}, el('h2', {}, 'Agreement and stalls'), syncLine, roundLine,
+      scroller(el('table', {}, el('thead', {}, el('tr', {}, ...['Member', 'Agreed version', 'In sync', 'Waiting on'].map((h) => el('th', {}, h)))), syncBody)),
+      el('div', { class: 'row' }, el('button', { type: 'button', onclick: () => postSync('abort', {}, 'Round aborted') }, 'Abort open round'),
+        removeSelect, el('button', { class: 'danger', type: 'button', onclick: () => {
+          if (removeSelect.value && confirm('Remove ' + removeSelect.value + ' from the round? Everyone remaining must acknowledge again.'))
+            postSync('remove', { name: removeSelect.value }, 'Participant removed');
+        } }, 'Remove participant'),
+        resetInput, el('button', { type: 'button', onclick: () => {
+          const v = Number(resetInput.value);
+          if (resetInput.value === '' || !Number.isInteger(v) || v < 0) return notice('Enter a version number (0 for the empty initial state)', true);
+          postSync('reset', { version: v }, 'Reset proposed; members must acknowledge');
+        } }, 'Propose reset to version')),
+      el('div', { class: 'row' }, el('label', {}, strictBox, ' Strict: messages must carry the current version'),
+        el('label', {}, autoBox, ' Auto-pass turn when stalled'), stallInput, turnSelect,
+        el('button', { class: 'primary', type: 'button', onclick: () => {
+          const body = {};
+          if (dirty.has('strict')) body.strict = strictBox.checked;
+          if (dirty.has('auto_pass')) body.auto_pass = autoBox.checked;
+          if (dirty.has('turn')) body.turn = turnSelect.value || null;
+          if (dirty.has('stall_seconds')) {
+            const secs = Number(stallInput.value);
+            if (!Number.isInteger(secs) || secs < 5 || secs > 86400) return notice('Stall seconds must be 5 to 86400', true);
+            body.stall_seconds = secs;
+          }
+          if (!Object.keys(body).length) return notice('No settings changed');
+          postSync('settings', body, 'Settings saved');
+        } }, 'Save settings')));
+    app.replaceChildren(el('p', {}, el('a', { href: '#/rooms' }, '\u2190 Rooms')), head, secrets, membersBox, syncBox, feed, injectForm(room));
 
     async function refreshMembers() {
       const [{ members }, { rooms }] = await Promise.all([api('GET', `rooms/${q}/members`), api('GET', 'rooms')]);
@@ -230,6 +278,30 @@
         pollMembers();
       } catch (err) { notice(err.message, true); }
     }
+    async function refreshSync() {
+      const s = await api('GET', `rooms/${q}/sync`);
+      if (view !== state.view) return;
+      const names = Object.keys(s.acks || {}).sort();
+      const removable = (s.round_open && s.round ? s.round.enrolled : names).slice().sort();
+      syncLine.textContent = `Committed version ${s.version}. ` + (s.stalled ? `STALLED (${s.kind}) since ${when(s.since)}: ${(s.members || []).join(', ')}.` : 'Not stalled.')
+        + (s.turn ? ` Turn: ${s.turn}.` : '');
+      roundLine.textContent = s.round_open && s.round
+        ? `Round v${s.round.version} open: acknowledged ${s.round.acked.length} of ${s.round.enrolled.length}`
+          + (s.unacked.length ? `, waiting for ${s.unacked.join(', ')}` : '') + `, deadline ${when(s.round.deadline)}.`
+        : 'No round open.';
+      syncBody.replaceChildren(...names.map((n) => el('tr', {}, el('td', {}, n), el('td', {}, s.acks[n] === null ? '-' : s.acks[n]),
+        el('td', {}, (s.drift || []).includes(n) ? 'DRIFT' : 'yes'), el('td', {}, (s.waiting_on && s.waiting_on[n]) || ''))));
+      const keep = removeSelect.value;
+      removeSelect.replaceChildren(el('option', { value: '' }, 'Remove participant...'), ...removable.map((n) => el('option', { value: n }, n)));
+      removeSelect.value = removable.includes(keep) ? keep : '';
+      const turn = turnSelect.value;
+      turnSelect.replaceChildren(el('option', { value: '' }, '(no turn holder)'), ...names.map((n) => el('option', { value: n }, n)));
+      // untouched fields follow the server (another admin tab or an auto-pass may have changed them); edited ones are left alone
+      if (!dirty.has('strict')) strictBox.checked = !!s.strict;
+      if (!dirty.has('auto_pass')) autoBox.checked = !!s.auto_pass;
+      if (!dirty.has('stall_seconds') && document.activeElement !== stallInput) stallInput.value = s.stall_seconds;
+      turnSelect.value = dirty.has('turn') ? (names.includes(turn) ? turn : '') : (s.turn || '');
+    }
     async function refreshFeed() {
       const res = await api('GET', `rooms/${encodeURIComponent(room)}/monitor?after=${after}&limit=200`);
       if (view !== state.view) return;  // stale response from a room we already left: ignore it, keep our cursor
@@ -249,9 +321,9 @@
       busy[key] = true;
       try { await fn(); } catch (e) { if (e.message !== 'signed out') notice(e.message, true); } finally { busy[key] = false; }
     };
-    const pollFeed = safe('feed', refreshFeed), pollMembers = safe('members', refreshMembers);
-    pollMembers(); pollFeed();
-    state.timers.push(setInterval(pollFeed, 2000), setInterval(pollMembers, 5000));
+    const pollFeed = safe('feed', refreshFeed), pollMembers = safe('members', refreshMembers), pollSync = safe('sync', refreshSync);
+    pollMembers(); pollFeed(); pollSync();
+    state.timers.push(setInterval(pollFeed, 2000), setInterval(pollMembers, 5000), setInterval(pollSync, 5000));
   }
 
   function injectForm(room) {
