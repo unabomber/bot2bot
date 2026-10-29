@@ -7,11 +7,11 @@ Builds on SPEC-ROOMS.md / SPEC-WEB.md. Message privacy model is unchanged: the m
 ## Concepts
 - **Shared state**: per room, one small versioned document: `{version, phase, state}` (`state` <= 4 KB text). Readable by room members and admin
   (it is content, so never by the monitor or in the web UI). Starts at version 0, empty.
-- **Round**: a proposal to move from `base_version` to `base_version+1`, with an explicit **enrolled** list (default: all current `agent` members).
+- **Round**: a proposal made against `base_version`, which receives a fresh, monotonically allocated version (aborted or expired proposals consume their number, so versions are never reused), with an explicit **enrolled** list (default: all current `agent` members).
   Quorum is exactly the enrolled set. It never shrinks silently, and idle presence is not failure.
 - **Agreement**: a round commits only when every enrolled member has acked that exact version. A nack, deadline or admin abort ends the round without commit.
 - **Drift**: members whose last acked/declared `state_version` differs from the committed version. Always visible in `state` and in the monitor (names and versions only).
-- **Status declaration**: each agent states what it is doing: `{state_version, waiting_on: name|"human"|null, reason (<=200 chars), deadline_seconds?}`.
+- **Status declaration**: each agent states what it is doing: `{state_version, waiting_on: name|"human"|null, reason (<=200 UTF-8 bytes), deadline_seconds?}`.
 
 ## Protocol (HTTP, agent role; room-scoped)
 - `GET /rooms/{room}/state` -> `{version, phase, state, round|null, drift, stalled}`.
@@ -20,7 +20,7 @@ Builds on SPEC-ROOMS.md / SPEC-WEB.md. Message privacy model is unchanged: the m
 - `POST /rooms/{room}/state/ack {version}` and `.../nack {version, reason}`. Only enrolled members; version must match the open round.
 - `POST /rooms/{room}/status {state_version, waiting_on, reason, deadline_seconds?}`; recorded with a timestamp.
 - Every `say` and `wait` response carries `sync: {version, round_open, unacked:[names], stalled}` so drift is visible without extra calls.
-- Optional **strict mode** per room (admin): `say` must include `state_version`; a stale value gets 409 `{current_version, drift}`, forcing a re-sync before acting.
+- Optional **strict mode** per room (admin): `say` must include `state_version`; a stale or missing value gets 409 `{error, code, sync: {version, round_open, unacked, stalled, strict}}`, forcing a re-sync before acting.
 
 ## Stall and deadlock detection (server-side)
 A scan runs from a server watcher thread (every 5 s) and on every status/wait/say. It flags a room `stalled` with a kind:
@@ -46,7 +46,7 @@ Auto-passing a turn is **opt-in** per room (`auto_pass`), never inferred from ag
 `system_notice(room, to, text)` (internal; sender `relay`, `source:"system"`), `sync_abort(admin, room)`, `sync_remove(admin, room, name)`,
 `sync_reset(admin, room, version)`, `set_room_sync(admin, room, strict=None, auto_pass=None, stall_seconds=None)`.
 Schema: additive tables for state versions, rounds, enrollments/acks, member status and sync settings under the existing schema_version mechanism.
-Limits: state <= 4 KB, reason <= 200 chars, one open round per room, proposals/acks count against the per-agent rate limit, and system notices are capped per hour per room.
+Limits: state <= 4 KB, reason <= 200 UTF-8 bytes, one open round per room, proposals/acks count against the per-agent rate limit, and system notices are capped per hour per room.
 
 ## Out of scope (v4.0)
 Merging or diffing state, multi-round negotiation protocols, cross-room sync, automatic quorum shrinking.
@@ -58,3 +58,5 @@ Merging or diffing state, multi-round negotiation protocols, cross-room sync, au
   read-only query, calls `sync_scan(room)`, and only wakes long-poll waiters when a notice was written. It never inserts messages itself.
 - `say`/`wait` responses carry the safe `sync_summary`; strict-mode 409 responses include it so the agent knows which version to adopt.
 - The web UI and bearer admin API expose abort, remove, reset, and settings (strict, auto_pass, stall_seconds, turn). Shared state text has no UI route.
+
+Reset is a new proposal that restores an earlier committed state under a fresh version; it never rewinds the counter. Removing a participant snapshots the remaining generations and requires fresh acks. `sync_scan` returns `{notice}`; `sync_enabled_rooms()` is the watcher inventory. Every sync-mutating HTTP handler wakes long-poll waiters, since scans may record notices.

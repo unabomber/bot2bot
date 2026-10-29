@@ -199,15 +199,18 @@
     const syncLine = el('p', { class: 'muted' });
     const roundLine = el('p', { class: 'muted' });
     const syncBody = el('tbody');
-    const strictBox = el('input', { type: 'checkbox' });
-    const autoBox = el('input', { type: 'checkbox' });
-    const stallInput = el('input', { type: 'number', min: '5', max: '86400', step: '1', placeholder: 'stall seconds' });
-    const turnSelect = el('select', {}, el('option', { value: '' }, '(no turn holder)'));
-    const removeSelect = el('select', {});
-    const resetInput = el('input', { type: 'number', min: '1', step: '1', placeholder: 'version' });
-    let settingsLoaded = false;
+    const strictBox = el('input', { type: 'checkbox', 'aria-label': 'Strict mode' });
+    const autoBox = el('input', { type: 'checkbox', 'aria-label': 'Auto-pass turn when stalled' });
+    const stallInput = el('input', { type: 'number', min: '5', max: '86400', step: '1', placeholder: 'stall seconds', 'aria-label': 'Stall seconds' });
+    const turnSelect = el('select', { 'aria-label': 'Turn holder' }, el('option', { value: '' }, '(no turn holder)'));
+    const removeSelect = el('select', { 'aria-label': 'Participant to remove' });
+    const resetInput = el('input', { type: 'number', min: '0', step: '1', placeholder: 'version', 'aria-label': 'Version to reset to' });
+    // only fields the admin actually edited are sent, so a stale form can never overwrite newer settings
+    const dirty = new Set();
+    const fields = { strict: strictBox, auto_pass: autoBox, stall_seconds: stallInput, turn: turnSelect };
+    for (const [key, input] of Object.entries(fields)) input.addEventListener('change', () => dirty.add(key));
     const postSync = async (action, body, done) => {
-      try { await api('POST', `rooms/${q}/sync/${action}`, body); notice(done); settingsLoaded = false; pollSync(); }
+      try { await api('POST', `rooms/${q}/sync/${action}`, body); notice(done); if (action === 'settings') dirty.clear(); pollSync(); }
       catch (err) { notice(err.message, true); }
     };
     const syncBox = el('section', {}, el('h2', {}, 'Agreement and stalls'), syncLine, roundLine,
@@ -219,15 +222,23 @@
         } }, 'Remove participant'),
         resetInput, el('button', { type: 'button', onclick: () => {
           const v = Number(resetInput.value);
-          if (!Number.isInteger(v) || v < 1) return notice('Enter a committed version number', true);
+          if (resetInput.value === '' || !Number.isInteger(v) || v < 0) return notice('Enter a version number (0 for the empty initial state)', true);
           postSync('reset', { version: v }, 'Reset proposed; members must acknowledge');
         } }, 'Propose reset to version')),
       el('div', { class: 'row' }, el('label', {}, strictBox, ' Strict: messages must carry the current version'),
         el('label', {}, autoBox, ' Auto-pass turn when stalled'), stallInput, turnSelect,
         el('button', { class: 'primary', type: 'button', onclick: () => {
-          const secs = Number(stallInput.value);
-          if (!Number.isInteger(secs) || secs < 5 || secs > 86400) return notice('Stall seconds must be 5 to 86400', true);
-          postSync('settings', { strict: strictBox.checked, auto_pass: autoBox.checked, stall_seconds: secs, turn: turnSelect.value || null }, 'Settings saved');
+          const body = {};
+          if (dirty.has('strict')) body.strict = strictBox.checked;
+          if (dirty.has('auto_pass')) body.auto_pass = autoBox.checked;
+          if (dirty.has('turn')) body.turn = turnSelect.value || null;
+          if (dirty.has('stall_seconds')) {
+            const secs = Number(stallInput.value);
+            if (!Number.isInteger(secs) || secs < 5 || secs > 86400) return notice('Stall seconds must be 5 to 86400', true);
+            body.stall_seconds = secs;
+          }
+          if (!Object.keys(body).length) return notice('No settings changed');
+          postSync('settings', body, 'Settings saved');
         } }, 'Save settings')));
     app.replaceChildren(el('p', {}, el('a', { href: '#/rooms' }, '\u2190 Rooms')), head, secrets, membersBox, syncBox, feed, injectForm(room));
 
@@ -268,6 +279,7 @@
       const s = await api('GET', `rooms/${q}/sync`);
       if (view !== state.view) return;
       const names = Object.keys(s.acks || {}).sort();
+      const removable = (s.round_open && s.round ? s.round.enrolled : names).slice().sort();
       syncLine.textContent = `Committed version ${s.version}. ` + (s.stalled ? `STALLED (${s.kind}) since ${when(s.since)}: ${(s.members || []).join(', ')}.` : 'Not stalled.')
         + (s.turn ? ` Turn: ${s.turn}.` : '');
       roundLine.textContent = s.round_open && s.round
@@ -277,14 +289,15 @@
       syncBody.replaceChildren(...names.map((n) => el('tr', {}, el('td', {}, n), el('td', {}, s.acks[n] === null ? '-' : s.acks[n]),
         el('td', {}, (s.drift || []).includes(n) ? 'DRIFT' : 'yes'), el('td', {}, (s.waiting_on && s.waiting_on[n]) || ''))));
       const keep = removeSelect.value;
-      removeSelect.replaceChildren(el('option', { value: '' }, 'Remove participant...'), ...names.map((n) => el('option', { value: n }, n)));
-      removeSelect.value = names.includes(keep) ? keep : '';
+      removeSelect.replaceChildren(el('option', { value: '' }, 'Remove participant...'), ...removable.map((n) => el('option', { value: n }, n)));
+      removeSelect.value = removable.includes(keep) ? keep : '';
       const turn = turnSelect.value;
       turnSelect.replaceChildren(el('option', { value: '' }, '(no turn holder)'), ...names.map((n) => el('option', { value: n }, n)));
-      if (!settingsLoaded) {          // fill the form once, so polling never overwrites what is being edited
-        strictBox.checked = !!s.strict; autoBox.checked = !!s.auto_pass; stallInput.value = s.stall_seconds; turnSelect.value = s.turn || '';
-        settingsLoaded = true;
-      } else { turnSelect.value = names.includes(turn) ? turn : ''; }
+      // untouched fields follow the server (another admin tab or an auto-pass may have changed them); edited ones are left alone
+      if (!dirty.has('strict')) strictBox.checked = !!s.strict;
+      if (!dirty.has('auto_pass')) autoBox.checked = !!s.auto_pass;
+      if (!dirty.has('stall_seconds') && document.activeElement !== stallInput) stallInput.value = s.stall_seconds;
+      turnSelect.value = dirty.has('turn') ? (names.includes(turn) ? turn : '') : (s.turn || '');
     }
     async function refreshFeed() {
       const res = await api('GET', `rooms/${encodeURIComponent(room)}/monitor?after=${after}&limit=200`);

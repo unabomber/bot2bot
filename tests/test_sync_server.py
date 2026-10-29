@@ -191,17 +191,75 @@ class SyncServerTests(unittest.TestCase):
         self.assertEqual(hub.domain.scanned, ['bad', 'quiet', 'noisy'])             # an error in one room did not stop the rest
         self.assertEqual(hub.wakes, 1)                                               # woke waiters only for the room with a notice
 
-    def test_real_watcher_thread_announces_a_stall(self):
-        self.declare('a', 0, 'b')
-        self.declare('b', 0, 'a')
+    def test_watcher_survives_unexpected_errors_and_logs_them(self):
+        class FakeDomain:
+            def __init__(self):
+                self.scanned = []
+
+            def sync_scan(self, room):
+                self.scanned.append(room)
+                if room == 'boom':
+                    raise RuntimeError('unexpected')
+                return {'notice': None}
+
+        class FakeHub:
+            def __init__(self):
+                self.domain = FakeDomain()
+
+            def wake(self):
+                pass
+        hub = FakeHub()
+        with self.assertLogs('bot2bot.relay', level='ERROR') as logs:
+            Watcher(hub, 1, rooms=lambda: ['boom', 'later']).scan_once()
+        self.assertEqual(hub.domain.scanned, ['boom', 'later'])      # the bad room did not starve the next one
+        self.assertIn('boom', logs.output[0])                         # and the failure is observable
+
+    def test_real_watcher_thread_announces_a_deadline_stall(self):
+        self.assertEqual(self.declare('a', 0, None)[0], 200)
+        self.assertEqual(self.call('POST', '/rooms/alpha/status', 'a',
+                                   {'state_version': 0, 'waiting_on': 'b', 'deadline_seconds': 1})[0], 200)
+        self.assertFalse(self.call('GET', '/rooms/alpha/sync', 'eye')[1]['stalled'])   # no cycle, deadline not reached yet
         server = make_server(self.domain, '127.0.0.1', 0, sync_interval=0.2)
         self.addCleanup(server.server_close)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.shutdown)
-        deadline = time.time() + 6
-        while time.time() < deadline and not self.call('GET', '/rooms/alpha/sync', 'eye')[1]['stalled']:
+        deadline = time.time() + 8
+        notices = []
+        while time.time() < deadline and not notices:
             time.sleep(0.2)
+            rows = self.call('GET', '/rooms/alpha/messages?after=0', 'c')[1]['messages']
+            notices = [m for m in rows if m['from'] == 'relay']
+        self.assertTrue(notices, 'the watcher never recorded a system notice')
         self.assertTrue(self.call('GET', '/rooms/alpha/sync', 'eye')[1]['stalled'])
+
+    def test_say_scans_for_stalls_and_every_say_reply_carries_sync(self):
+        self.declare('a', 0, 'b')
+        self.declare('b', 0, 'a')
+        status, body = self.call('POST', '/rooms/alpha/say', 'c', {'to': ['a'], 'text': 'hi'})
+        self.assertEqual(status, 200, body)
+        self.assertIn('sync', body)
+        rows = self.call('GET', '/rooms/alpha/messages?after=0', 'a')[1]['messages']
+        self.assertTrue([m for m in rows if m['from'] == 'relay'])   # the say itself scanned and recorded the notice
+        self.tok['old'] = self.domain.mint_agent('old', 'agent')
+        self.domain.mint_agent('peer', 'agent')
+        status, body = self.call('POST', '/say', 'old', {'to': 'peer', 'text': 'legacy'})
+        self.assertEqual(status, 200, body)
+        self.assertIn('id', body)
+        self.assertIn('sync', body)
+
+    def test_failed_make_server_does_not_leak_a_watcher(self):
+        before = {t for t in threading.enumerate() if t.name == 'sync-watcher'}
+        with self.assertRaises(ValueError):
+            make_server(self.domain, '0.0.0.0', 0, sync_interval=0.2)   # non-loopback without public_origin
+        after = {t for t in threading.enumerate() if t.name == 'sync-watcher'}
+        self.assertEqual(before, after)
+
+    def test_server_close_stops_the_watcher(self):
+        server = make_server(self.domain, '127.0.0.1', 0, sync_interval=0.2)
+        watcher = server.watcher
+        self.assertTrue(watcher.is_alive())
+        server.server_close()
+        self.assertFalse(watcher.is_alive())
 
 
 if __name__ == '__main__':
