@@ -1,5 +1,6 @@
 """WAL-aware v3 backup, atomic v4 upgrades and durable synchronization state."""
 import hashlib
+import time
 from contextlib import closing
 from pathlib import Path
 import sqlite3
@@ -21,7 +22,7 @@ class SyncMigrationTests(unittest.TestCase):
         principals = {name:d.lookup(hashlib.sha256(t.encode()).hexdigest()) for name,t in tokens.items()}
         d.room_post(principals['a'],'room',['b'],'private-label','private payload')
         with store.transaction() as db:
-            for table in ('sync_statuses','sync_enrollments','sync_versions','sync_rooms'):
+            for table in ('sync_keys','sync_statuses','sync_enrollments','sync_versions','sync_rooms'):
                 db.execute('DROP TABLE '+table)
             db.execute("UPDATE settings SET value='3' WHERE key='schema_version'")
             key = db.execute("SELECT value FROM settings WHERE key='web_csrf_key'").fetchone()[0]
@@ -42,7 +43,7 @@ class SyncMigrationTests(unittest.TestCase):
                 reopened = Store(path)
                 try:
                     with reopened.transaction(read_only=True) as db:
-                        self.assertEqual(db.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()[0],'4')
+                        self.assertEqual(db.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()[0],'5')
                         self.assertEqual(db.execute("SELECT value FROM settings WHERE key='web_csrf_key'").fetchone()[0],key)
                     self.assertEqual(Domain(reopened).sync_monitor(admin,'room')['version'],0)
                 finally:
@@ -56,7 +57,7 @@ class SyncMigrationTests(unittest.TestCase):
             path = Path(directory)/'relay.db'
             store,_,_,_ = self.fixture(path)
             with store.transaction() as db:
-                db.execute("CREATE TRIGGER reject_v4 BEFORE INSERT ON settings WHEN NEW.key='schema_version' AND NEW.value='4' BEGIN SELECT RAISE(ABORT,'no upgrade'); END")
+                db.execute("CREATE TRIGGER reject_v5 BEFORE INSERT ON settings WHEN NEW.key='schema_version' AND NEW.value='5' BEGIN SELECT RAISE(ABORT,'no upgrade'); END")
             store.close()
             with self.assertRaises(sqlite3.IntegrityError):
                 Store(path)
@@ -75,12 +76,15 @@ class SyncMigrationTests(unittest.TestCase):
             d.sync_propose(p['a'],'room',0,'SECRET_STATE',deadline_seconds=86400)
             d.sync_status(p['a'],'room',0,'b','SECRET_REASON')
             d.sync_status(p['b'],'room',0,'a','SECRET_REASON')
+            self.assertEqual(d.stats(admin,'room')['messages'],1)            # only the fixture payload: inside the grace period nothing is announced
+            later = time.time()+61
+            self.assertTrue(d.sync_scan('room',later)['notify'])
             self.assertEqual(d.stats(admin,'room')['messages'],2)
             store.close()
             store = Store(path)
             try:
                 d = Domain(store)
-                self.assertFalse(d.sync_scan('room')['notify'])
+                self.assertFalse(d.sync_scan('room',later)['notify'])        # the incident and its backoff survived the restart
                 self.assertEqual(d.sync_state(p['a'],'room')['round']['state'],'SECRET_STATE')
                 self.assertEqual(d.sync_ack(p['b'],'room',1)['version'],1)
                 self.assertEqual(d.stats(admin,'room')['messages'],2)

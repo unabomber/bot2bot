@@ -103,6 +103,10 @@ CREATE TABLE IF NOT EXISTS sync_enrollments (
  PRIMARY KEY(room_id,version,name),
  FOREIGN KEY(room_id,version) REFERENCES sync_versions(room_id,version)
 );
+CREATE TABLE IF NOT EXISTS sync_keys (
+ room_id TEXT NOT NULL REFERENCES rooms(id), name TEXT NOT NULL, key TEXT NOT NULL,
+ created REAL NOT NULL, result TEXT NOT NULL, PRIMARY KEY(room_id,name,key)
+);
 CREATE TABLE IF NOT EXISTS sync_statuses (
  room_id TEXT NOT NULL REFERENCES rooms(id), name TEXT NOT NULL,
  generation INTEGER NOT NULL, state_version INTEGER NOT NULL, waiting_on TEXT,
@@ -133,10 +137,10 @@ class Store:
         if 'settings' in tables:
             row = self.connection.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()
             version = int(row[0]) if row else None
-        if version is not None and version > 4:
+        if version is not None and version > 5:
             raise RuntimeError('database schema is newer than this relay supports')
-        if tables and version != 4 and str(path) != ':memory:':
-            backup = Path(str(path) + (f'.v{version}.bak' if version in (2,3) else '.v1.bak'))
+        if tables and version != 5 and str(path) != ':memory:':
+            backup = Path(str(path) + (f'.v{version}.bak' if version in (2,3,4) else '.v1.bak'))
             if not backup.exists():
                 # SQLite backup includes committed WAL pages, unlike copying the main file.
                 target = sqlite3.connect(str(backup))
@@ -147,11 +151,14 @@ class Store:
         self.connection.executescript(SCHEMA)
         with self.transaction() as db:
             current = db.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()
-            if current and int(current[0]) > 4:
+            if current and int(current[0]) > 5:
                 raise RuntimeError('database schema is newer than this relay supports')
             if 'display_path' not in {r['name'] for r in db.execute('PRAGMA table_info(claims)')}:
                 db.execute('ALTER TABLE claims ADD COLUMN display_path TEXT')
+            if current and int(current[0]) == 5:
+                return
             if current and int(current[0]) == 4:
+                self._sync_tables(db)   # idempotent; adds the v5 columns and key table
                 return
             if current and int(current[0]) == 3:
                 self._sync_tables(db)
@@ -189,7 +196,12 @@ class Store:
         for statement in SYNC_SCHEMA.split(';'):
             if statement.strip():
                 db.execute(statement)
-        db.execute("INSERT OR REPLACE INTO settings VALUES ('schema_version','4')")
+        # v5: per-room proposal deadline default and a severity level on system notices
+        if 'proposal_seconds' not in {r['name'] for r in db.execute('PRAGMA table_info(sync_rooms)')}:
+            db.execute('ALTER TABLE sync_rooms ADD COLUMN proposal_seconds INTEGER NOT NULL DEFAULT 3600')
+        if 'level' not in {r['name'] for r in db.execute('PRAGMA table_info(messages)')}:
+            db.execute('ALTER TABLE messages ADD COLUMN level TEXT')
+        db.execute("INSERT OR REPLACE INTO settings VALUES ('schema_version','5')")
 
     @staticmethod
     def _web_tables(db):

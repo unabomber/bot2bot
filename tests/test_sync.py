@@ -180,17 +180,19 @@ class SyncTests(unittest.TestCase):
     def test_cycle_notice_is_atomic_idempotent_and_backed_off(self):
         self.d.sync_status(self.p('a'),'alpha',0,'b','private a')
         self.d.sync_status(self.p('b'),'alpha',0,'a','private b')
-        rows = self.d.room_fetch(self.p('a'),'alpha')
-        self.assertEqual(len(rows),1)
-        self.assertEqual((rows[0]['from'],rows[0]['source']),('relay','system'))
-        self.assertNotIn('private',rows[0]['text'])
+        self.assertEqual(len(self.d.room_fetch(self.p('a'),'alpha')),0)     # a fresh cycle gets a grace period first
         with ThreadPoolExecutor(4) as pool:
             scans = list(pool.map(lambda _: self.d.sync_scan('alpha',self.now),range(4)))
         self.assertFalse(any(r['notify'] for r in scans))
         self.now += 60
-        self.assertTrue(self.d.sync_scan('alpha',self.now)['notify'])
+        with ThreadPoolExecutor(4) as pool:
+            scans = list(pool.map(lambda _: self.d.sync_scan('alpha',self.now),range(4)))
+        self.assertEqual(sum(1 for r in scans if r['notify']),1)           # concurrent scans announce exactly once
+        rows = self.d.room_fetch(self.p('a'),'alpha')
+        self.assertEqual((rows[0]['from'],rows[0]['source'],rows[0]['level']),('relay','system','warn'))
+        self.assertNotIn('private',rows[0]['text'])
         self.assertFalse(self.d.sync_scan('alpha',self.now)['notify'])
-        for delta in (120,240,480):
+        for delta in (120,240,480,960):
             self.now += delta
             self.assertTrue(self.d.sync_scan('alpha',self.now)['notify'])
         self.now += 2000
@@ -295,7 +297,7 @@ class SyncTests(unittest.TestCase):
         with self.store.transaction() as db:
             db.executemany('INSERT INTO sync_statuses VALUES (?,?,?,?,?,?,?,?)',
                 [('large',n,1,0,names[i+1] if i<999 else names[998],'private',self.now,None) for i,n in enumerate(names)])
-        scan = self.d.sync_scan('large',self.now)
+        scan = self.d.sync_scan('large',self.now+5)     # grace for a 5 s stall time is 5 s
         self.assertEqual((scan['kind'],scan['members']),('cycle',names[-2:]))
 
 

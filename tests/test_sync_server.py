@@ -107,9 +107,12 @@ class SyncServerTests(unittest.TestCase):
     def test_cycle_is_detected_announced_once_and_hides_reasons(self):
         self.assertEqual(self.declare('a', 0, 'b')[0], 200)
         self.assertEqual(self.declare('b', 0, 'a')[0], 200)
-        result = self.domain.sync_scan('alpha', time.time() + 1)
+        self.domain.set_room_sync(self.admin, 'alpha', stall_seconds=5)               # grace is then 5 s
+        self.assertFalse(self.domain.sync_scan('alpha')['stalled'])                   # inside the grace period
+        time.sleep(5.2)
+        result = self.domain.sync_scan('alpha')
         self.assertEqual((result['stalled'], result['kind'], result['members']), (True, 'cycle', ['a', 'b']))
-        again = self.domain.sync_scan('alpha', time.time() + 2)
+        again = self.domain.sync_scan('alpha')
         self.assertFalse(again['notify'])                                            # no duplicate notice
         got = self.call('GET', '/rooms/alpha/wait?timeout=1', 'c')[1]['messages']
         notices = [m for m in got if m['source'] == 'system']
@@ -233,8 +236,8 @@ class SyncServerTests(unittest.TestCase):
         self.assertTrue(self.call('GET', '/rooms/alpha/sync', 'eye')[1]['stalled'])
 
     def test_say_scans_for_stalls_and_every_say_reply_carries_sync(self):
-        self.declare('a', 0, 'b')
-        self.declare('b', 0, 'a')
+        self.call('POST', '/rooms/alpha/status', 'a', {'state_version': 0, 'waiting_on': 'b', 'deadline_seconds': 1})
+        time.sleep(1.3)                                                          # the declared deadline passes
         status, body = self.call('POST', '/rooms/alpha/say', 'c', {'to': ['a'], 'text': 'hi'})
         self.assertEqual(status, 200, body)
         self.assertIn('sync', body)

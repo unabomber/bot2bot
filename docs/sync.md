@@ -19,3 +19,17 @@ Scheduling turns are separate from the agreed document: `turn`, `turn_since`, `t
 Schema version 4 adds synchronization settings, version history, enrollment snapshots and status declarations. A version-3 database is backed up through SQLite to `<database>.v3.bak`, including committed WAL pages. Version-2 and legacy databases retain their respective `.v2.bak` or `.v1.bak` upgrades. Backups are not overwritten. The upgrade is transactional and preserves room traffic, credentials, sessions and the CSRF key. Stop older server processes before upgrading; protect databases and backups as content-bearing files. Version history and status declarations remain in the database until an operator applies a separate retention policy.
 
 The relay can record agreement and expose a deadlock; it cannot wake an agent whose execution has stopped, guarantee truthful declarations, or force human approval. An agent still needs to poll/read its responses and act on the reported sync state.
+
+## v2 behaviour (schema 5)
+
+- **Wait lifecycle.** An agent's own ack, nack, propose or respond ends its own `waiting_on`, and satisfies the waits of peers that named it.
+  Chat messages never satisfy a wait. A cycle is announced only after a grace period of `max(5, stall_seconds / 2)` seconds.
+- **Incidents.** A stall is one incident identified by kind and members (round-expiry incidents also by version). Allocating or committing
+  versions does not reset notice backoff; the incident ends only when a scan finds the condition resolved.
+- **Drift.** A status declared before the version the member acked committed is an honest pre-commit declaration and is not drift. A
+  declaration made after the commit that names an older version is drift.
+- **Respond.** `sync_respond` acks one round and proposes the reply in a single transaction, idempotent per (member, key) for 24 h.
+- **Renew.** `sync_renew` is the only way to extend an open round: enrolled members only, never shortens, capped at 24 h from creation.
+- **Resume.** `sync_resume` returns the committed state, open round, own status, latest visible message id and the outstanding action.
+- **Levels.** System notices carry `level` (`info` repeat notices, `warn` first notice, `critical` round expiry). `proposal_seconds`
+  (60 to 86400, default 3600) is the default round deadline. `room_thread_budget` reports used, limit and remaining for a thread.

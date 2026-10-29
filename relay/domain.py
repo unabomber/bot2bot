@@ -471,9 +471,12 @@ class Domain:
     @staticmethod
     def _envelope(row):
         to = json.loads(row['recipient']) if row['recipient'].startswith('[') else [row['recipient']]
-        return {'id':row['public_id'],'room':row['room_id'],'thread':row['label'],
-                'from':row['sender'],'to':to,'ts':row['created'],'source':row['source'],
-                'untrusted':True,'text':row['text']}
+        env = {'id':row['public_id'],'room':row['room_id'],'thread':row['label'],
+               'from':row['sender'],'to':to,'ts':row['created'],'source':row['source'],
+               'untrusted':True,'text':row['text']}
+        if row['source']=='system':
+            env['level'] = (row['level'] if 'level' in row.keys() else None) or 'info'
+        return env
 
     def _room_send(self, p, room, to, thread, text, human=False, state_version=None):
         _string(thread,'thread',128)
@@ -644,7 +647,7 @@ class Domain:
         if implicit and proposer not in names:
             raise DomainError(400,'proposer must be enrolled')
         version = cfg['allocated']+1
-        db.execute('UPDATE sync_rooms SET allocated=?,enabled=1,fingerprint=NULL,stalled_kind=NULL,stalled_members=NULL,stalled_since=NULL,notice_count=0,next_notice=NULL WHERE room_id=?',(version,room))
+        db.execute('UPDATE sync_rooms SET allocated=?,enabled=1 WHERE room_id=?',(version,room))   # incidents outlive version churn
         db.execute('INSERT INTO sync_versions VALUES (?,?,?,?,?,?,?,?,?,?)',
                    (room,version,cfg['version'],phase,state,proposer,now,now+duration,'open',None))
         db.executemany('INSERT INTO sync_enrollments VALUES (?,?,?,?,?)',
@@ -660,7 +663,7 @@ class Domain:
         if db.execute("SELECT 1 FROM sync_enrollments e LEFT JOIN room_members m ON m.room_id=e.room_id AND m.name=e.name WHERE e.room_id=? AND e.version=? AND (m.name IS NULL OR m.active!=1 OR m.role!='agent' OR m.generation!=e.generation)",(room,version)).fetchone():
             return
         db.execute("UPDATE sync_versions SET status='committed',ended=? WHERE room_id=? AND version=?",(now,room,version))
-        db.execute('UPDATE sync_rooms SET version=?,fingerprint=NULL,stalled_kind=NULL,stalled_members=NULL,stalled_since=NULL,notice_count=0,next_notice=NULL WHERE room_id=?',(version,room))
+        db.execute('UPDATE sync_rooms SET version=? WHERE room_id=?',(version,room))   # the next scan ends an incident that really resolved
         self._event(db,room,'relay','sync-commit',str(version))
 
     def _sync_view(self, db, room, content=False):
@@ -677,12 +680,13 @@ class Domain:
         participants.update({r['name']:dict(r) for r in db.execute("SELECT name,generation FROM room_members WHERE room_id=? AND active=1 AND role='agent' ORDER BY name",(room,))})
         for member in sorted(participants.values(),key=lambda m:m['name']):
             name = member['name']
-            ack = db.execute("SELECT e.version,e.acked FROM sync_enrollments e JOIN sync_versions v ON v.room_id=e.room_id AND v.version=e.version WHERE e.room_id=? AND e.name=? AND e.generation=? AND e.acked IS NOT NULL AND v.status='committed' ORDER BY e.version DESC LIMIT 1",(room,name,member['generation'])).fetchone()
+            ack = db.execute("SELECT e.version,e.acked,v.ended FROM sync_enrollments e JOIN sync_versions v ON v.room_id=e.room_id AND v.version=e.version WHERE e.room_id=? AND e.name=? AND e.generation=? AND e.acked IS NOT NULL AND v.status='committed' ORDER BY e.version DESC LIMIT 1",(room,name,member['generation'])).fetchone()
             status = statuses.get(name)
             known = ack['version'] if ack else None
             if known is None and cfg['version']==0:
                 known = 0
-            if status and (ack is None or status['declared']>ack['acked']):
+            # A declaration made before the acked version committed is an honest pre-commit status, not disagreement.
+            if status and (ack is None or status['declared']>(ack['ended'] if ack['ended'] is not None else ack['acked'])):
                 known = status['state_version']
             if not db.execute("SELECT 1 FROM room_members WHERE room_id=? AND name=? AND active=1 AND role='agent'",(room,name)).fetchone():
                 known = None
@@ -698,6 +702,7 @@ class Domain:
         round_view = None
         if pending:
             round_view = {k:pending[k] for k in ('version','base_version','created','deadline')}
+            round_view['remaining'] = max(0.0,pending['deadline']-time.time())
             round_view.update(enrolled=[e['name'] for e in enrolled],acked=[e['name'] for e in enrolled if e['name'] not in unacked])
             if content:
                 round_view.update(phase=pending['phase'],state=pending['state'])
@@ -707,7 +712,7 @@ class Domain:
                   'members':json.loads(cfg['stalled_members'] or '[]'),
                   'waiting_on':{name:s['waiting_on'] for name,s in statuses.items()},
                   'strict':bool(cfg['strict']),'auto_pass':bool(cfg['auto_pass']),
-                  'stall_seconds':cfg['stall_seconds'],'turn':cfg['turn'],
+                  'stall_seconds':cfg['stall_seconds'],'proposal_seconds':cfg['proposal_seconds'],'turn':cfg['turn'],
                   'turn_version':cfg['turn_version'],'turn_since':cfg['turn_since']}
         if content:
             result.update(phase=current['phase'] if current else '',state=current['state'] if current else '',
@@ -736,23 +741,50 @@ class Domain:
         with self.store.transaction(read_only=True) as db:
             return [r[0] for r in db.execute("SELECT s.room_id FROM sync_rooms s JOIN rooms r ON r.id=s.room_id WHERE s.enabled=1 AND r.status='open' ORDER BY s.room_id")]
 
+    def _sync_clear_waits(self, db, room, name):
+        """An agent's own sync action ends its own obsolete wait, and satisfies waits on it that predate the action."""
+        db.execute('UPDATE sync_statuses SET waiting_on=NULL,deadline=NULL WHERE room_id=? AND name=?',(room,name))
+        db.execute('UPDATE sync_statuses SET waiting_on=NULL,deadline=NULL WHERE room_id=? AND waiting_on=?',(room,name))
+
+    def _propose_tx(self, db, actor, room, base_version, state, phase, duration, enrolled=None):
+        cfg = self._sync_config(db,room)
+        if base_version!=cfg['version'] or self._sync_open(db,room):
+            raise DomainError(409,'stale base_version or round already open')
+        names = enrolled if enrolled is not None else [r[0] for r in db.execute("SELECT name FROM room_members WHERE room_id=? AND active=1 AND role='agent' ORDER BY name",(room,))]
+        now = time.time()
+        if db.execute('SELECT count(*) FROM sync_versions WHERE room_id=? AND proposer=? AND created>?',(room,actor['name'],now-3600)).fetchone()[0]>=self.hourly_messages:
+            raise DomainError(429,'hourly proposal budget exhausted')
+        version = self._sync_start(db,room,cfg,state,phase,names,actor['name'],now,duration)
+        self._sync_clear_waits(db,room,actor['name'])
+        return version
+
     def sync_propose(self, p, room, base_version, state, phase=None, enrolled=None, deadline_seconds=None):
         _integer(base_version,'base_version')
         self._sync_text(state,'state',4096)
         phase = '' if phase is None else _string(phase,'phase',64)
-        duration = self._sync_duration(deadline_seconds)
         self._sync_tick(p,room,True)
         with self.store.transaction() as db:
             actor = self._sync_actor(db,p,room,True)
-            cfg = self._sync_config(db,room)
-            if base_version!=cfg['version'] or self._sync_open(db,room):
-                raise DomainError(409,'stale base_version or round already open')
-            names = enrolled if enrolled is not None else [r[0] for r in db.execute("SELECT name FROM room_members WHERE room_id=? AND active=1 AND role='agent' ORDER BY name",(room,))]
-            now = time.time()
-            if db.execute('SELECT count(*) FROM sync_versions WHERE room_id=? AND proposer=? AND created>?',(room,actor['name'],now-3600)).fetchone()[0]>=self.hourly_messages:
-                raise DomainError(429,'hourly proposal budget exhausted')
-            self._sync_start(db,room,cfg,state,phase,names,actor['name'],now,duration)
+            duration = self._sync_duration(deadline_seconds,self._sync_config(db,room)['proposal_seconds'])
+            self._propose_tx(db,actor,room,base_version,state,phase,duration,enrolled)
             return self._sync_view(db,room,True)
+
+    def _vote_tx(self, db, actor, room, version, reason=None):
+        pending = self._sync_open(db,room)
+        if pending is None or pending['version']!=version or time.time()>=pending['deadline']:
+            raise DomainError(409,'no matching open round')
+        e = db.execute('SELECT * FROM sync_enrollments WHERE room_id=? AND version=? AND name=?',(room,version,actor['name'])).fetchone()
+        m = db.execute('SELECT generation FROM room_members WHERE room_id=? AND name=?',(room,actor['name'])).fetchone()
+        if e is None or e['generation']!=m['generation']:
+            raise DomainError(403,'not enrolled with this credential generation')
+        now = time.time()
+        if reason is None:
+            db.execute('UPDATE sync_enrollments SET acked=coalesce(acked,?) WHERE room_id=? AND version=? AND name=?',(now,room,version,actor['name']))
+            self._sync_commit(db,room,version,now)
+        else:
+            db.execute("UPDATE sync_versions SET status='nacked',ended=? WHERE room_id=? AND version=?",(now,room,version))
+            self._event(db,room,actor['name'],'sync-nack',str(version))
+        self._sync_clear_waits(db,room,actor['name'])
 
     def _sync_vote(self, p, room, version, reason=None):
         _integer(version,'version',1)
@@ -761,20 +793,7 @@ class Domain:
         self._sync_tick(p,room,True)
         with self.store.transaction() as db:
             actor = self._sync_actor(db,p,room,True)
-            pending = self._sync_open(db,room)
-            if pending is None or pending['version']!=version or time.time()>=pending['deadline']:
-                raise DomainError(409,'no matching open round')
-            e = db.execute('SELECT * FROM sync_enrollments WHERE room_id=? AND version=? AND name=?',(room,version,actor['name'])).fetchone()
-            m = db.execute('SELECT generation FROM room_members WHERE room_id=? AND name=?',(room,actor['name'])).fetchone()
-            if e is None or e['generation']!=m['generation']:
-                raise DomainError(403,'not enrolled with this credential generation')
-            now = time.time()
-            if reason is None:
-                db.execute('UPDATE sync_enrollments SET acked=coalesce(acked,?) WHERE room_id=? AND version=? AND name=?',(now,room,version,actor['name']))
-                self._sync_commit(db,room,version,now)
-            else:
-                db.execute("UPDATE sync_versions SET status='nacked',ended=? WHERE room_id=? AND version=?",(now,room,version))
-                self._event(db,room,actor['name'],'sync-nack',str(version))
+            self._vote_tx(db,actor,room,version,reason)
             return self._sync_view(db,room,True)
 
     def sync_ack(self, p, room, version):
@@ -782,6 +801,78 @@ class Domain:
 
     def sync_nack(self, p, room, version, reason):
         return self._sync_vote(p,room,version,reason)
+
+    def sync_respond(self, p, room, ack_version, base_version, state, phase=None, deadline_seconds=None, key=None):
+        """Ack the open round and propose the reply in one transaction. Either both happen or neither does, and a
+        retry with the same key returns the first outcome instead of repeating the move."""
+        _integer(ack_version,'ack_version',1)
+        _integer(base_version,'base_version')
+        self._sync_text(state,'state',4096)
+        phase = '' if phase is None else _string(phase,'phase',64)
+        self._sync_text(key,'key',64,False)
+        self._sync_tick(p,room,True)
+        with self.store.transaction() as db:
+            actor = self._sync_actor(db,p,room,True)
+            old = db.execute('SELECT result FROM sync_keys WHERE room_id=? AND name=? AND key=?',(room,actor['name'],key)).fetchone()
+            if old is not None:
+                result = json.loads(old['result'])
+                result['replayed'] = True
+                return result
+            duration = self._sync_duration(deadline_seconds,self._sync_config(db,room)['proposal_seconds'])
+            self._vote_tx(db,actor,room,ack_version)
+            self._propose_tx(db,actor,room,base_version,state,phase,duration)   # base must equal the version the ack committed
+            view = self._sync_view(db,room,True)
+            result = {'acked':{'version':ack_version},'round':view['round'],'replayed':False,'sync':{k:view[k] for k in ('version','round_open','unacked','stalled','strict')}}
+            db.execute('INSERT INTO sync_keys VALUES (?,?,?,?,?)',(room,actor['name'],key,time.time(),json.dumps(result)))
+            db.execute('DELETE FROM sync_keys WHERE room_id=? AND created<?',(room,time.time()-86400))
+            return result
+
+    def sync_renew(self, p, room, version, seconds):
+        """Explicitly extend an open round. Never implicit: heartbeats must not keep an abandoned round alive."""
+        _integer(version,'version',1)
+        _integer(seconds,'seconds',60,86400)
+        self._sync_tick(p,room,True)
+        with self.store.transaction() as db:
+            actor = self._sync_actor(db,p,room,True)
+            pending = self._sync_open(db,room)
+            if pending is None or pending['version']!=version:
+                raise DomainError(409,'no matching open round')
+            if db.execute('SELECT 1 FROM sync_enrollments WHERE room_id=? AND version=? AND name=?',(room,version,actor['name'])).fetchone() is None:
+                raise DomainError(403,'only an enrolled member can renew')
+            now = time.time()
+            deadline = min(now+seconds,pending['created']+86400)   # hard ceiling: 24 h from creation
+            if deadline>pending['deadline']:
+                db.execute('UPDATE sync_versions SET deadline=? WHERE room_id=? AND version=?',(deadline,room,version))
+            self._event(db,room,actor['name'],'sync-renew',str(version))
+            return self._sync_view(db,room,True)
+
+    def sync_resume(self, p, room):
+        """One snapshot for an agent that just (re)started: what is agreed, what is open, and what it owes next."""
+        self._sync_tick(p,room)
+        with self.store.transaction() as db:
+            actor = self._sync_actor(db,p,room)
+            view = self._sync_view(db,room,True)
+            own = db.execute('SELECT state_version,waiting_on,reason,declared,deadline FROM sync_statuses WHERE room_id=? AND name=?',(room,actor['name'])).fetchone()
+            latest = db.execute('SELECT coalesce(max(m.public_id),0) FROM messages m WHERE m.room_id=? AND (?!=\'agent\' OR EXISTS(SELECT 1 FROM deliveries d WHERE d.room_id=m.room_id AND d.message_id=m.id AND d.member=?))',(room,actor['role'],actor['name'])).fetchone()[0]
+            round_view = view['round']
+            outstanding = 'none'
+            if round_view:
+                outstanding = 'ack' if actor['name'] in view['unacked'] else 'wait'
+            elif view['turn']==actor['name']:
+                outstanding = 'respond'
+            return {'committed':{'version':view['version'],'phase':view['phase'],'state':view['state']},
+                    'round':({**round_view,'phase':round_view.get('phase',''),'state':round_view.get('state',''),'unacked':view['unacked']} if round_view else None),
+                    'status':dict(own) if own else None,'latest_id':latest,'outstanding':outstanding,
+                    'proposal_seconds':view['proposal_seconds'],'strict':view['strict'],'turn':view['turn'],
+                    'stalled':view['stalled'],'kind':view['kind']}
+
+    def room_thread_budget(self, p, room, thread):
+        _string(thread,'thread',128)
+        with self.store.transaction(read_only=True) as db:
+            self._room_auth(db,p,room)
+            row = db.execute('SELECT used FROM room_threads WHERE room_id=? AND label=?',(room,thread)).fetchone()
+            used = row['used'] if row else 0
+            return {'used':used,'limit':self.thread_budget,'remaining':max(0,self.thread_budget-used)}
 
     def sync_status(self, p, room, state_version, waiting_on=None, reason='', deadline_seconds=None):
         _integer(state_version,'state_version')
@@ -853,7 +944,7 @@ class Domain:
                 raise DomainError(400,'removal must leave at least one enrolled participant')
             now = time.time()
             db.execute("UPDATE sync_versions SET status='removed',ended=? WHERE room_id=? AND version=?",(now,room,pending['version']))
-            self._sync_start(db,room,cfg,pending['state'],pending['phase'],[n for n in names if n!=name],actor['name'],now,self._sync_duration(None),False)
+            self._sync_start(db,room,cfg,pending['state'],pending['phase'],[n for n in names if n!=name],actor['name'],now,cfg['proposal_seconds'],False)
             self._event(db,room,actor['name'],'sync-remove',name)
             self._system_notice(db,room,'*','Synchronization participant removed: '+name,now)
             return self._sync_view(db,room)
@@ -870,23 +961,25 @@ class Domain:
             if version!=0 and old is None:
                 raise DomainError(404,'no such committed version')
             names = [r[0] for r in db.execute("SELECT name FROM room_members WHERE room_id=? AND active=1 AND role='agent' ORDER BY name",(room,))]
-            self._sync_start(db,room,cfg,old['state'] if old else '',old['phase'] if old else '',names,actor['name'],time.time(),300,False)
+            self._sync_start(db,room,cfg,old['state'] if old else '',old['phase'] if old else '',names,actor['name'],time.time(),cfg['proposal_seconds'],False)
             self._event(db,room,actor['name'],'sync-reset',str(version))
             return self._sync_view(db,room)
 
     _TURN_UNSET = object()
 
-    def set_room_sync(self, admin, room, strict=None, auto_pass=None, stall_seconds=None, turn=_TURN_UNSET):
+    def set_room_sync(self, admin, room, strict=None, auto_pass=None, stall_seconds=None, turn=_TURN_UNSET, proposal_seconds=None):
         for value in (strict,auto_pass):
             if value is not None and type(value) is not bool:
                 raise DomainError(400,'sync flags must be boolean')
         if stall_seconds is not None:
             _integer(stall_seconds,'stall_seconds',5,86400)
+        if proposal_seconds is not None:
+            _integer(proposal_seconds,'proposal_seconds',60,86400)
         with self.store.transaction() as db:
             actor = self._admin(db,admin)
             self._room_auth(db,admin,room)
             self._sync_config(db,room)
-            for key,value in (('strict',strict),('auto_pass',auto_pass),('stall_seconds',stall_seconds)):
+            for key,value in (('strict',strict),('auto_pass',auto_pass),('stall_seconds',stall_seconds),('proposal_seconds',proposal_seconds)):
                 if value is not None:
                     db.execute('UPDATE sync_rooms SET '+key+'=?,enabled=1 WHERE room_id=?',(value,room))
             if turn is not self._TURN_UNSET:
@@ -896,11 +989,11 @@ class Domain:
                         raise DomainError(400,'turn must name an active room agent')
                 now = time.time()
                 db.execute('UPDATE sync_rooms SET turn=?,turn_since=?,turn_version=turn_version+1,enabled=1 WHERE room_id=?',(turn,now,room))
-                self._system_notice(db,room,'*','Scheduling turn set to '+(turn or 'none'),now)
+                self._system_notice(db,room,'*','Scheduling turn set to '+(turn or 'none'),now,'info')
             self._event(db,room,actor['name'],'sync-config')
             return self._sync_view(db,room)
 
-    def _system_notice(self, db, room, to, text, now):
+    def _system_notice(self, db, room, to, text, now, level='warn'):
         cfg = self._sync_config(db,room,now)
         if now-cfg['notice_hour']>=3600:
             db.execute('UPDATE sync_rooms SET notice_hour=?,hour_count=0 WHERE room_id=?',(now,room))
@@ -925,19 +1018,21 @@ class Domain:
             db.execute('INSERT INTO room_threads(room_id,label,storage_key,creator,created,public_number) VALUES (?,?,?,?,?,?)',(room,label,key,'relay',now,number))
             t = db.execute('SELECT * FROM room_threads WHERE room_id=? AND label=?',(room,label)).fetchone()
         public_id = db.execute('SELECT coalesce(max(public_id),0)+1 FROM messages WHERE room_id=?',(room,)).fetchone()[0]
-        mid = db.execute('INSERT INTO messages(sender,recipient,thread,text,created,room_id,source,bytes,thread_no,public_id) VALUES (?,?,?,?,?,?,?,?,?,?)',
-                         ('relay',json.dumps(names),t['storage_key'],text,now,room,'system',len(text.encode('utf-8')),t['number'],public_id)).lastrowid
+        mid = db.execute('INSERT INTO messages(sender,recipient,thread,text,created,room_id,source,bytes,thread_no,public_id,level) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                         ('relay',json.dumps(names),t['storage_key'],text,now,room,'system',len(text.encode('utf-8')),t['number'],public_id,level)).lastrowid
         db.executemany('INSERT INTO deliveries VALUES (?,?,?)',[(room,mid,n) for n in names])
         db.execute('UPDATE sync_rooms SET hour_count=hour_count+1 WHERE room_id=?',(room,))
         row = db.execute('SELECT m.*,t.label FROM messages m JOIN room_threads t ON t.number=m.thread_no WHERE m.id=?',(mid,)).fetchone()
         return self._envelope(row)
 
-    def system_notice(self, room, to, text):
+    def system_notice(self, room, to, text, level='warn'):
         # Internal only: no public route may accept arbitrary system notices.
         _name(room)
         self._sync_text(text,'system notice',8192,False)
         with self.store.transaction() as db:
-            return self._system_notice(db,room,to,text,time.time())
+            if level not in ('info','warn','critical'):
+                raise DomainError(400,'invalid notice level')
+            return self._system_notice(db,room,to,text,time.time(),level)
 
     def sync_scan(self, room, now=None):
         _name(room)
@@ -948,6 +1043,7 @@ class Domain:
             cfg = self._sync_config(db,room,now)
             pending = self._sync_open(db,room)
             kind, involved = None, []
+            round_specific = False   # only round-expiry incidents are tied to one version
             version = pending['version'] if pending else cfg['version']
             enrolled = self._sync_enrolled(db,room,version) if version else []
             names = [e['name'] for e in enrolled] or [r[0] for r in db.execute("SELECT name FROM room_members WHERE room_id=? AND active=1 AND role='agent' ORDER BY name",(room,))]
@@ -958,12 +1054,14 @@ class Domain:
                     if e['acked'] is None or member is None or member['generation']!=e['generation']:
                         involved.append(e['name'])
                 kind = 'silent' if involved else 'deadline'
+                round_specific = True
                 db.execute("UPDATE sync_versions SET status='expired',ended=? WHERE room_id=? AND version=?",(now,room,version))
                 self._event(db,room,'relay','sync-expire',str(version))
             elif cfg['stalled_kind'] in ('silent','deadline') and pending is None:
                 latest = db.execute('SELECT status,version FROM sync_versions WHERE room_id=? ORDER BY version DESC LIMIT 1',(room,)).fetchone()
                 if latest and latest['status']=='expired':
                     version = latest['version']
+                    round_specific = True
                     kind,involved = cfg['stalled_kind'],json.loads(cfg['stalled_members'] or '[]')
             if kind is None:
                 expired = [n for n,s in statuses.items() if s['deadline'] is not None and now>=s['deadline']]
@@ -981,7 +1079,8 @@ class Domain:
                     if node in positions:
                         cycles.update(path[positions[node]:])
                     visited.update(path)
-                if cycles:
+                grace = max(5,cfg['stall_seconds']//2)   # a transient turn handoff is not a deadlock
+                if cycles and all(statuses[n]['declared']<=now-grace for n in cycles):
                     kind,involved = 'cycle',sorted(cycles)
             if kind is None and names:
                 last_traffic = db.execute("SELECT max(created) FROM messages WHERE room_id=? AND source!='system'",(room,)).fetchone()[0]
@@ -1001,7 +1100,7 @@ class Domain:
             room_open = db.execute('SELECT status FROM rooms WHERE id=?',(room,)).fetchone()[0]=='open'
             if not cfg['enabled'] or not room_open:
                 kind,involved = None,[]
-            fingerprint = json.dumps([kind,sorted(involved),version]) if kind else None
+            fingerprint = json.dumps([kind,sorted(involved),version if round_specific else None]) if kind else None
             same = fingerprint is not None and fingerprint==cfg['fingerprint']
             since = cfg['stalled_since'] if same else now if kind else None
             count = cfg['notice_count'] if same else 0
@@ -1019,7 +1118,8 @@ class Domain:
                 text = 'Synchronization stalled ('+kind+'): '+', '.join(involved)
                 if passed:
                     text += '; scheduling turn passed to '+turn
-                notice = self._system_notice(db,room,names,text,now)
+                level = 'critical' if kind in ('silent','deadline') else 'warn' if not same else 'info'
+                notice = self._system_notice(db,room,names,text,now,level)
                 # Reserve an attempt even at the hourly cap; scans cannot spin.
                 count += 1
             next_notice = now+min(60*2**max(count-1,0),960) if due else cfg['next_notice'] if same else None
