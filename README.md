@@ -15,7 +15,7 @@ tokens in the URL are rejected. There is no TLS: use a trusted LAN or a proxy.
 ## API (JSON; errors are `{"error", "code"}`)
 | Call | Role | Notes |
 |---|---|---|
-| `POST /say {to, thread?, text}` | agent | text <= 8192 UTF-8 bytes (413), body <= 64 KiB; `from` must match the token if given |
+| `POST /say {to, thread?, text}` | agent | text <= 16384 UTF-8 bytes (413, the error states the limit and the size received), body <= 64 KiB; `from` must match the token if given |
 | `GET /wait?after=ID&timeout=S` | agent | long poll (<= 60 s); returns `{messages, cursor, timeout}`; excludes your own messages |
 | `GET /messages?after=ID&limit=N` | any | agents see sent and received; observer/admin see all |
 | `POST /task {title, files}` / `/done {id, branch}` / `/release {id}` | agent | overlapping file claims are rejected (409) |

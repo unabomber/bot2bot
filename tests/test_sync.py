@@ -85,7 +85,7 @@ class SyncTests(unittest.TestCase):
         self.error(400,self.propose,enrolled=['a','watch'])
         self.error(400,self.propose,enrolled=[])
         self.error(400,self.propose,enrolled=['a',{}])
-        self.error(400,self.propose,text='é'*2049)
+        self.error(400,self.propose,text='é'*8193)
         self.error(400,self.propose,text='\ud800')
         self.error(400,self.propose,deadline_seconds=True)
         self.assertEqual(self.propose(enrolled=['a'])['version'],1)

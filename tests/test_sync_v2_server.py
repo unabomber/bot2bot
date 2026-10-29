@@ -105,6 +105,17 @@ class SyncV2ServerTests(unittest.TestCase):
     def test_unknown_level_is_rejected(self):
         self.assertEqual(self.call('GET', '/rooms/alpha/wait?after=0&timeout=1&level=loud', 'a')[0], 400)
 
+    def test_http_errors_state_the_limit_and_the_size_received(self):
+        ok = self.call('POST', '/rooms/alpha/say', 'a', {'to': ['b'], 'thread': 'big', 'text': 'x' * 16384})
+        self.assertEqual(ok[0], 200, ok)
+        status, body = self.call('POST', '/rooms/alpha/say', 'a', {'to': ['b'], 'thread': 'big', 'text': 'x' * 16385})
+        self.assertEqual((status, body['error']), (413, 'text exceeds 16384 UTF-8 bytes (received 16385)'))
+        status, body = self.call('POST', '/rooms/alpha/state/propose', 'a', {'base_version': 0, 'state': 's' * 16385})
+        self.assertEqual((status, body['error']), (400, 'state exceeds 16384 UTF-8 bytes (received 16385)'))
+        status, body = self.call('POST', '/rooms/alpha/say', 'a', {'to': ['b'], 'text': 'x' * 70000})
+        self.assertEqual(status, 413)
+        self.assertIn('exceeds 65536 bytes (received', body['error'])
+
     # ---- settings ----
     def test_proposal_seconds_setting_is_accepted_over_http(self):
         status, body = self.call('POST', '/admin/rooms/alpha/sync/settings', 'root', {'proposal_seconds': 3600})

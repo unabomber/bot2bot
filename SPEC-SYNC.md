@@ -11,7 +11,7 @@ Builds on SPEC-ROOMS.md / SPEC-WEB.md. Message privacy model is unchanged: the m
   Quorum is exactly the enrolled set. It never shrinks silently, and idle presence is not failure.
 - **Agreement**: a round commits only when every enrolled member has acked that exact version. A nack, deadline or admin abort ends the round without commit.
 - **Drift**: members whose last acked/declared `state_version` differs from the committed version. Always visible in `state` and in the monitor (names and versions only).
-- **Status declaration**: each agent states what it is doing: `{state_version, waiting_on: name|"human"|null, reason (<=200 UTF-8 bytes), deadline_seconds?}`.
+- **Status declaration**: each agent states what it is doing: `{state_version, waiting_on: name|"human"|null, reason (<=1024 UTF-8 bytes), deadline_seconds?}`.
 
 ## Protocol (HTTP, agent role; room-scoped)
 - `GET /rooms/{room}/state` -> `{version, phase, state, round|null, drift, stalled}`.
@@ -46,7 +46,7 @@ Auto-passing a turn is **opt-in** per room (`auto_pass`), never inferred from ag
 `system_notice(room, to, text)` (internal; sender `relay`, `source:"system"`), `sync_abort(admin, room)`, `sync_remove(admin, room, name)`,
 `sync_reset(admin, room, version)`, `set_room_sync(admin, room, strict=None, auto_pass=None, stall_seconds=None)`.
 Schema: additive tables for state versions, rounds, enrollments/acks, member status and sync settings under the existing schema_version mechanism.
-Limits: state <= 4 KB, reason <= 200 UTF-8 bytes, one open round per room, proposals/acks count against the per-agent rate limit, and system notices are capped per hour per room.
+Limits: state <= 16 KiB, reason <= 1 KiB (UTF-8 bytes), one open round per room, proposals/acks count against the per-agent rate limit, and system notices are capped per hour per room.
 
 ## Out of scope (v4.0)
 Merging or diffing state, multi-round negotiation protocols, cross-room sync, automatic quorum shrinking.

@@ -87,7 +87,7 @@ class RoomTests(unittest.TestCase):
         self.assertEqual(self.d.room_fetch(self.p('c'),'alpha'),[])
         self.assertEqual(self.d.room_fetch(self.p('b'),'alpha',before['id']),[injected])
         self.error(403,self.d.inject,self.p('a'),'alpha','*','x','fake human')
-        self.error(413,self.d.inject,self.admin,'alpha','*','x','é'*4097)
+        self.error(413,self.d.inject,self.admin,'alpha','*','x','é'*8193)
         self.d.resume()
         self.d.set_room_closed(self.admin,'alpha',False)
         self.d.room_post(self.p('a'),'alpha',['b'],'x','after')

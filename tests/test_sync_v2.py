@@ -237,6 +237,28 @@ class SyncV2Tests(unittest.TestCase):
         self.assertEqual(self.d.room_thread_budget(self.p('b'), 'alpha', 'main'), {'used': 4, 'limit': 10, 'remaining': 6})
         self.error(403, self.d.room_thread_budget, self.p('a'), 'beta', 'main')
 
+    # ---- limits and error messages ----
+    def test_limits_are_16k_text_16k_state_1k_reason_and_errors_say_so(self):
+        self.d.room_post(self.p('a'), 'alpha', ['b'], 'main', 'x' * 16384)                       # at the limit
+        with self.assertRaises(DomainError) as caught:
+            self.d.room_post(self.p('a'), 'alpha', ['b'], 'main', 'x' * 16385)
+        self.assertEqual(caught.exception.code, 413)
+        self.assertEqual(caught.exception.message, 'text exceeds 16384 UTF-8 bytes (received 16385)')
+        self.assertEqual(self.propose(text='y' * 16384)['round']['version'], 1)
+        self.d.sync_abort(self.admin, 'alpha')
+        with self.assertRaises(DomainError) as caught:
+            self.d.sync_propose(self.p('a'), 'alpha', 0, 'é' * 8193)
+        self.assertEqual(caught.exception.message, 'state exceeds 16384 UTF-8 bytes (received 16386)')
+        self.status('a', 0, None)
+        self.d.sync_status(self.p('a'), 'alpha', 0, None, 'r' * 1024)
+        with self.assertRaises(DomainError) as caught:
+            self.d.sync_status(self.p('a'), 'alpha', 0, None, 'r' * 1240)
+        self.assertEqual(caught.exception.message, 'reason exceeds 1024 UTF-8 bytes (received 1240)')
+        self.propose(text='ok')
+        with self.assertRaises(DomainError) as caught:
+            self.d.sync_nack(self.p('b'), 'alpha', 3, 'n' * 1025)
+        self.assertIn('1024 UTF-8 bytes (received 1025)', caught.exception.message)
+
     # ---- migration ----
     def test_v4_database_upgrades_to_v5_with_backup(self):
         self.now = None

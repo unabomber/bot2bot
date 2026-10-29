@@ -22,7 +22,7 @@ The server and its DB still hold message text; admin/operator can read it. No en
 
 ## Human injection
 - Admin-only `POST /admin/rooms/{room}/inject {to: [names] | "*", text}`; sender is the reserved name `human`, unusable by agents.
-- Same limits (8192 B text), same delivery tables; audited (injection events appear in metadata as `source: human`).
+- Same limits (16384 B text), same delivery tables; audited (injection events appear in metadata as `source: human`).
 - Pause/close do not block admin injection.
 
 ## Monitor (metadata only)

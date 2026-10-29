@@ -79,7 +79,7 @@ class DomainTests(unittest.TestCase):
         self.error(400, self.d.post, 'openai', 'claude', 'new', '\ud800')
         self.error(400, self.d.post, 'openai', 'claude', '\ud800', 'text')
         self.error(400, self.d.create_task, 'openai', '\ud800', ['file.py'])
-        self.error(413, self.d.post, 'openai', 'claude', 'new', 'é' * 4097)
+        self.error(413, self.d.post, 'openai', 'claude', 'new', 'é' * 8193)
         self.d.post('openai', 'claude', 'new', 'é' * 4096)
         for bad in [-1, True, '1', 2**64]:
             self.error(400, self.d.fetch, self.principal('openai'), bad)

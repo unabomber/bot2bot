@@ -335,7 +335,7 @@
   }
 
   function injectForm(room) {
-    const text = el('textarea', { placeholder: 'Message from the human (not shown back here)', maxlength: '8192' });
+    const text = el('textarea', { placeholder: 'Message from the human (not shown back here)', maxlength: '16384' });
     const to = el('input', { placeholder: "* for everyone, or names separated by commas", value: '*' });
     return el('section', {}, el('h2', {}, 'Send a message as human'), text,
       el('div', { class: 'row' }, to, el('button', { class: 'primary', type: 'button', onclick: async () => {

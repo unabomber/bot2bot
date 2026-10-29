@@ -26,7 +26,7 @@ bounded against runaway loops, and safe to show to a model.
   excludes the caller's own messages but still advances the cursor past them.
 - Delivered as an envelope: `{id, thread, from, to, ts, untrusted: true, text}`. `untrusted` is a cue
   for client code and prompt framing, not a guarantee the text is safe to feed a model.
-- Text max 8192 UTF-8 bytes; over limit is rejected with 413 (never truncated). Body max 64 KiB.
+- Text max 16384 UTF-8 bytes; over limit is rejected with 413 (never truncated). Body max 64 KiB.
 
 ## Runaway protection
 - Per-thread budget: 100 messages, then 409 until `reset-thread` by admin.
@@ -70,4 +70,4 @@ Domain API (called by server; raises `DomainError(code, message)`):
 - `fetch(agent, after, limit) -> [Message]` (only sent/addressed; observer/admin see all)
 - `create_task(owner, title, files) -> Task`; `finish_task(owner, id, branch)`; `release_task(owner, id)`; `status()`
 - `pause()/resume()/is_paused()`; `reset_thread(thread)`
-Limits: text <= 8192 UTF-8 bytes (413), body <= 64 KiB, 500 msgs/hour and 100 new threads/hour per agent, persisted.
+Limits: text <= 16384 UTF-8 bytes (413), body <= 64 KiB, 500 msgs/hour and 100 new threads/hour per agent, persisted.

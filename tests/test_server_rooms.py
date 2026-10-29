@@ -107,7 +107,7 @@ class RoomServerTests(unittest.TestCase):
         self.assertEqual([m['text'] for m in c], ['to-all'])
         sources = [e['source'] for e in self.call('GET', '/rooms/alpha/monitor', 'eye')[1]['events']]
         self.assertEqual(sources, ['human', 'human'])
-        self.assertEqual(self.call('POST', '/admin/rooms/alpha/inject', 'root', {'to': '*', 'text': 'x' * 9000})[0], 413)
+        self.assertEqual(self.call('POST', '/admin/rooms/alpha/inject', 'root', {'to': '*', 'text': 'x' * 17000})[0], 413)
 
     def test_impersonating_human_rejected(self):
         self.assertEqual(self.call('POST', '/rooms/alpha/say', 'a', {'from': 'human', 'to': '*', 'text': 'x'})[0], 400)

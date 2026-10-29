@@ -56,6 +56,11 @@ def _overlap(a, b):
     return a == b or a.startswith(b + '/') or b.startswith(a + '/')
 
 
+TEXT_LIMIT = 16384     # message text, UTF-8 bytes
+STATE_LIMIT = 16384    # shared proposal state, UTF-8 bytes
+REASON_LIMIT = 1024    # nack and status reasons, UTF-8 bytes
+
+
 class Domain:
     def __init__(self, store, *, hourly_messages=500, hourly_threads=100, thread_budget=100, hourly_injections=60):
         self.store = store
@@ -147,8 +152,8 @@ class Domain:
             size = len(text.encode('utf-8'))
         except UnicodeEncodeError:
             raise DomainError(400, 'text must be valid Unicode') from None
-        if size > 8192:
-            raise DomainError(413, 'text exceeds 8192 UTF-8 bytes')
+        if size > TEXT_LIMIT:
+            raise DomainError(413, f'text exceeds {TEXT_LIMIT} UTF-8 bytes (received {size})')
         now = time.time()
         with self.store.transaction() as db:
             self._writer(db, sender)
@@ -486,8 +491,8 @@ class Domain:
             size = len(text.encode('utf-8'))
         except UnicodeEncodeError:
             raise DomainError(400,'text must be valid Unicode') from None
-        if size>8192:
-            raise DomainError(413,'text exceeds 8192 UTF-8 bytes')
+        if size>TEXT_LIMIT:
+            raise DomainError(413,f'text exceeds {TEXT_LIMIT} UTF-8 bytes (received {size})')
         now = time.time()
         with self.store.transaction() as db:
             actor = self._admin(db,p) if human else self._room_auth(db,p,room,'write')
@@ -605,8 +610,10 @@ class Domain:
             size = len(value.encode('utf-8'))
         except UnicodeEncodeError:
             raise DomainError(400,field+' must be valid Unicode') from None
-        if size>limit or '\x00' in value:
-            raise DomainError(400,field+' exceeds limit or contains NUL')
+        if size>limit:
+            raise DomainError(400,f'{field} exceeds {limit} UTF-8 bytes (received {size})')
+        if '\x00' in value:
+            raise DomainError(400,field+' must not contain NUL')
         return value
 
     @staticmethod
@@ -760,7 +767,7 @@ class Domain:
 
     def sync_propose(self, p, room, base_version, state, phase=None, enrolled=None, deadline_seconds=None):
         _integer(base_version,'base_version')
-        self._sync_text(state,'state',4096)
+        self._sync_text(state,'state',STATE_LIMIT)
         phase = '' if phase is None else _string(phase,'phase',64)
         self._sync_tick(p,room,True)
         with self.store.transaction() as db:
@@ -789,7 +796,7 @@ class Domain:
     def _sync_vote(self, p, room, version, reason=None):
         _integer(version,'version',1)
         if reason is not None:
-            self._sync_text(reason,'reason',200,False)
+            self._sync_text(reason,'reason',REASON_LIMIT,False)
         self._sync_tick(p,room,True)
         with self.store.transaction() as db:
             actor = self._sync_actor(db,p,room,True)
@@ -807,7 +814,7 @@ class Domain:
         retry with the same key returns the first outcome instead of repeating the move."""
         _integer(ack_version,'ack_version',1)
         _integer(base_version,'base_version')
-        self._sync_text(state,'state',4096)
+        self._sync_text(state,'state',STATE_LIMIT)
         phase = '' if phase is None else _string(phase,'phase',64)
         self._sync_text(key,'key',64,False)
         self._sync_tick(p,room,True)
@@ -876,7 +883,7 @@ class Domain:
 
     def sync_status(self, p, room, state_version, waiting_on=None, reason='', deadline_seconds=None):
         _integer(state_version,'state_version')
-        self._sync_text(reason,'reason',200)
+        self._sync_text(reason,'reason',REASON_LIMIT)
         duration = None if deadline_seconds is None else self._sync_duration(deadline_seconds)
         with self.store.transaction() as db:
             actor = self._sync_actor(db,p,room,True)

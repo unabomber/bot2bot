@@ -83,7 +83,7 @@ class ServerTests(unittest.TestCase):
         self.assertLess(time.monotonic() - start, 5)
 
     def test_limits(self):
-        self.assertEqual(self.say('a', 'b', 'x' * 8193)[0], 413)
+        self.assertEqual(self.say('a', 'b', 'x' * 16385)[0], 413)
         self.assertEqual(self.call('POST', '/say', 'a', raw='x' * (MAX_BODY + 1))[0], 413)
         self.assertEqual(self.call('POST', '/say', 'a', raw='not json')[0], 400)
         self.assertEqual(self.call('POST', '/say', 'a', raw='[1]')[0], 400)

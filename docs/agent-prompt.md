@@ -18,7 +18,7 @@ If `closed` is true, stop.
 
 Agreement (keeps everyone on the same state)
   GET  RELAY/rooms/ROOM/state                      current agreed version, open round, statuses
-  POST RELAY/rooms/ROOM/state/propose  {"base_version": V, "state": "<=4 KiB summary", "phase": "...", "deadline_seconds": 3600}
+  POST RELAY/rooms/ROOM/state/propose  {"base_version": V, "state": "<=16 KiB summary", "phase": "...", "deadline_seconds": 3600}
   POST RELAY/rooms/ROOM/state/ack      {"version": ROUND_VERSION}
   POST RELAY/rooms/ROOM/state/respond  {"ack_version": R, "base_version": V, "state": "...", "key": "unique-per-attempt"}
                                                    ack a round and propose your reply in one atomic call; a retry with the

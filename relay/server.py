@@ -216,7 +216,7 @@ def make_handler(hub):
         def body(self):
             length = self.unread
             if length > MAX_BODY:
-                raise DomainError(413, 'request body too large')
+                raise DomainError(413, f'request body exceeds {MAX_BODY} bytes (received {length})')
             self.unread = 0
             raw = self.rfile.read(length)
             if len(raw) != length:
